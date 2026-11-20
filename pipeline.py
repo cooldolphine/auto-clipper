@@ -18,7 +18,8 @@ processed = json.loads(pfile.read_text()) if pfile.exists() else []
 index = json.loads(index_file.read_text()) if index_file.exists() else []
 Path("output").mkdir(exist_ok=True)
 
-videos = discover(cfg, processed)
+cookie_file = "cookies.txt" if Path("cookies.txt").exists() else None
+videos = discover(cfg, processed, cookie_file)
 print(f"\n{len(videos)} new video(s) to clip")
 cookies = ["--cookies", "cookies.txt"] if Path("cookies.txt").exists() else []
 
@@ -39,6 +40,10 @@ for v in videos:
         print("  clipper failed, skipping this video")
     pfile.write_text(json.dumps(processed, indent=1))
     index_file.write_text(json.dumps(index, indent=2))
+
+if videos and not any((Path("output") / v["id"] / "clips.json").exists() for v in videos):
+    print("\nAll downloads failed. If you saw 'Sign in to confirm you're not a bot', YouTube is "
+          "blocking this server: run on your own PC, or add cookies.txt (see README).")
 
 # always write state files, even when nothing was found
 pfile.write_text(json.dumps(processed, indent=1))
