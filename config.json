@@ -1,15 +1,17 @@
 {
   "queries": [
-    "Gta VI" ,
-    "GTA 6"
+    "GTA 6 trailer reaction live stream",
+    "GTA 6 news live stream replay",
+    "GTA 6 Glitches",
+    "GTA 6 Graphics"
   ],
   "channels": [],
-  "min_duration_minutes": 20,
-  "max_age_days": 7,
+  "min_duration_minutes": 15,
+  "max_age_days": 30,
+  "min_views": 0,
   "results_per_source": 15,
   "max_videos_per_run": 3,
   "clips_per_video": 5,
   "clip_length_seconds": 30,
-  "min_views": 1000,
   "whisper_model": "base"
 }
