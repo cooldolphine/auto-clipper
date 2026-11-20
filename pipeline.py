@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import deque
 from pathlib import Path
 
 from discover import discover
@@ -23,6 +24,23 @@ def words(name):
 def vid_id(url):
     m = re.search(r"(?:v=|youtu\.be/|/live/|/shorts/|/embed/)([\w-]{11})", url)
     return m.group(1) if m else re.sub(r"\W", "", url)[-11:]
+
+
+PROGRESS = re.compile(r"^\[download\]\s+[\d.]+% of")
+
+
+def run_clipper(cmd):
+    """Run clipper.py, hide the thousands of download-progress lines, remember the errors."""
+    errors = deque(maxlen=3)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        if PROGRESS.match(line) and "100% of" not in line:
+            continue
+        print(line, end="", flush=True)
+        if "ERROR" in line or "Error" in line:
+            errors.append(line.strip())
+    proc.wait()
+    return proc.returncode, list(errors)
 
 
 cfg = json.loads(Path("config.json").read_text())
@@ -62,11 +80,11 @@ else:
 print(f"\n{len(videos)} video(s) to clip")
 cookies = ["--cookies", "cookies.txt"] if cookie_file else []
 
-run_clips = []
+run_clips, failures = [], []
 for v in videos:
     print(f"\n=== {v['title']} ({v['url']})")
     out = Path("output") / v["id"]
-    r = subprocess.run([
+    code, errs = run_clipper([
         sys.executable, "clipper.py", v["url"], "--out", str(out),
         "--num", str(cfg["clips_per_video"]), "--length", str(cfg["clip_length_seconds"]),
         "--model", cfg.get("whisper_model", "base"),
@@ -75,19 +93,22 @@ for v in videos:
     ])
     if v["id"] not in processed:
         processed.append(v["id"])  # mark even on failure so we don't loop forever
-    if r.returncode == 0 and (out / "clips.json").exists():
+    if code == 0 and (out / "clips.json").exists():
         for clip in json.loads((out / "clips.json").read_text()):
             clip["file"] = f"{v['id']}/{clip['file']}"
             index.append(clip)
             run_clips.append(clip)
     else:
         print("  clipper failed, skipping this video")
+        failures.append((v["title"] or v["url"], errs[-1] if errs else "see the log above"))
     pfile.write_text(json.dumps(processed, indent=1))
     index_file.write_text(json.dumps(index, indent=2))
 
-if videos and not run_clips:
-    print("\nNo clips were made. If you saw 'Sign in to confirm you're not a bot', YouTube is "
-          "blocking this server: refresh the YT_COOKIES secret.")
+if failures:
+    print("\n==== WHY CLIPS WERE NOT MADE ====")
+    for title, why in failures:
+        print(f"- {title}\n    {why}")
+    print("If you see 'Sign in to confirm you're not a bot', refresh the YT_COOKIES secret.")
 
 # ---- flat folder for the GitHub Release (what the phone app reads) ----
 rel = Path("release")
@@ -104,3 +125,8 @@ for c in run_clips:
 for w in Path("output").glob("*/work"):
     for f in w.glob("*"):
         f.unlink()
+
+# make the run show as FAILED (not "Done") when nothing was clipped
+if not run_clips:
+    print("\nNo clips were made.")
+    sys.exit(1)
