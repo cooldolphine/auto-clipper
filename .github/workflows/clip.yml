@@ -17,6 +17,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: denoland/setup-deno@v2   # JS runtime yt-dlp needs for YouTube
+        with:
+          deno-version: v2.x
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: pip install -r requirements.txt
       - name: Write cookies (optional)
