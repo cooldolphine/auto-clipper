@@ -15,17 +15,29 @@ FLAT = {"quiet": True, "extract_flat": True, "skip_download": True}
 FULL = {"quiet": True, "skip_download": True, "noplaylist": True}
 
 
+def _extract(target, opts):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(target, download=False)
+
+
 def _flat_ids(source, n):
     """Return list of video ids from a search query or channel URL."""
+    info, last_err = None, None
     if source.startswith("http"):
-        target, opts = source, {**FLAT, "playlistend": n}
+        attempts = [(source, {**FLAT, "playlistend": n})]
     else:
-        target, opts = f"ytsearchdate{n}:{source}", FLAT
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-    except Exception as e:  # keep going if one source fails
-        print(f"  ! source failed ({source}): {e}")
+        # newest-first search, then plain relevance search as a fallback.
+        # Fetch extra results because age/length filters drop many.
+        attempts = [(f"ytsearchdate{n * 2}:{source}", FLAT), (f"ytsearch{n * 2}:{source}", FLAT)]
+    for target, opts in attempts:
+        try:
+            info = _extract(target, opts)
+            if info and info.get("entries"):
+                break
+        except Exception as e:
+            last_err = e
+    if not info or not info.get("entries"):
+        print(f"  ! no results for ({source}): {last_err or 'empty'}")
         return []
     ids = []
     for e in info.get("entries") or []:
@@ -33,7 +45,7 @@ def _flat_ids(source, n):
             ids.append(e["id"])
         elif e and e.get("entries"):  # channel tabs nest entries
             ids += [x["id"] for x in e["entries"] if x and x.get("id")]
-    return ids[:n]
+    return ids[: n * 2]
 
 
 def _details(video_id):
