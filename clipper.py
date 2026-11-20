@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import yt_dlp
 from faster_whisper import WhisperModel
+from yt_dlp.utils import download_range_func
 
 # Words that usually show up around funny / chaotic / glitchy moments
 KEYWORDS = [
@@ -33,29 +34,74 @@ def run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
-def download(url, workdir, cookies=None, height=720, max_minutes=240):
-    opts = {
-        "format": f"bv*[height<={height}]+ba/b[height<={height}]",
-        "outtmpl": str(workdir / "video.%(ext)s"),
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "noplaylist": True,
-        "writesubtitles": True,
-        "subtitleslangs": ["live_chat"],  # chat replay of streams (if any)
-    }
+def base_opts(cookies):
+    o = {"quiet": True, "noplaylist": True}
     if cookies:
-        opts["cookiefile"] = cookies
-    # look before downloading, so we can fail with a clear reason
-    with yt_dlp.YoutubeDL({**opts, "skip_download": True, "writesubtitles": False}) as ydl:
+        o["cookiefile"] = cookies
+    return o
+
+
+def probe(url, cookies, max_minutes):
+    """Look at the video first, so we can fail early with a clear reason."""
+    with yt_dlp.YoutubeDL({**base_opts(cookies), "skip_download": True}) as ydl:
         pre = ydl.extract_info(url, download=False)
     if pre.get("live_status") in ("is_live", "is_upcoming"):
         sys.exit("ERROR: this video is still live or has not started. Clip it after the stream ends.")
     dur = pre.get("duration") or 0
     if dur > max_minutes * 60:
         sys.exit(f"ERROR: this video is {dur // 3600}h {dur % 3600 // 60}m long; the limit is {max_minutes} min.")
+    return pre
+
+
+def download(url, workdir, cookies=None, height=720):
+    """Short videos: download the whole video (+ live chat replay if there is one)."""
+    opts = {
+        **base_opts(cookies),
+        "format": f"bv*[height<={height}]+ba/b[height<={height}]",
+        "outtmpl": str(workdir / "video.%(ext)s"),
+        "merge_output_format": "mp4",
+        "writesubtitles": True,
+        "subtitleslangs": ["live_chat"],  # chat replay of streams (if any)
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
     return workdir / "video.mp4", info
+
+
+AUDIO_EXT = {".m4a", ".webm", ".opus", ".mp3", ".mp4", ".mka", ".ogg"}
+
+
+def download_audio(url, workdir, cookies=None):
+    """Long videos: download only the audio (small) + live chat replay."""
+    opts = {
+        **base_opts(cookies),
+        "format": "ba[abr<=130]/ba",
+        "outtmpl": str(workdir / "audio_src.%(ext)s"),
+        "writesubtitles": True,
+        "subtitleslangs": ["live_chat"],
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+    src = next(p for p in workdir.glob("audio_src.*") if p.suffix in AUDIO_EXT and "live_chat" not in p.name)
+    return src, info
+
+
+def download_segment(url, workdir, n, start, end, cookies=None, height=720):
+    """Long videos: download ONLY one section of the video."""
+    opts = {
+        **base_opts(cookies),
+        "format": f"bv*[height<={height}]+ba/b[height<={height}]",
+        "outtmpl": str(workdir / f"seg_{n:02}.%(ext)s"),
+        "merge_output_format": "mp4",
+        "download_ranges": download_range_func(None, [(start, end)]),
+        "force_keyframes_at_cuts": True,
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    files = [p for p in workdir.glob(f"seg_{n:02}*") if p.suffix in (".mp4", ".mkv", ".webm")]
+    if not files:
+        raise RuntimeError(f"section {start}-{end}s was not downloaded")
+    return files[0]
 
 
 def extract_audio(video, wav):
@@ -78,10 +124,22 @@ def loudness_per_second(wav):
     return np.concatenate(out) if out else np.zeros(1, dtype=np.float32)
 
 
-def transcribe(wav, model_size="base", language=None):
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+def load_model(model_size="base"):
+    return WhisperModel(model_size, device="cpu", compute_type="int8")
+
+
+def transcribe_wav(model, wav, language=None, offset=0.0):
     segments, _ = model.transcribe(str(wav), vad_filter=True, language=language)
-    return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
+    return [{"start": s.start + offset, "end": s.end + offset, "text": s.text.strip()} for s in segments]
+
+
+def transcribe(wav, model_size="base", language=None):
+    return transcribe_wav(load_model(model_size), wav, language)
+
+
+def keyword_hits(text):
+    t = text.lower()
+    return sum(1 for k in KEYWORDS if k in t)
 
 
 CHAT_WORDS = ["pagal", "gazab", "kamaal", "haha", "हाहा", "lmao", "lol", "omg", "wtf", "clip", "💀", "😂", "🤣", "kek", "lmfao", "no way", "bruh"]
@@ -186,25 +244,9 @@ def cut_clip(video, outdir, name, start, length, has_subs):
     ], cwd=outdir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("url")
-    ap.add_argument("--num", type=int, default=5, help="number of clips")
-    ap.add_argument("--length", type=int, default=30, help="clip length in seconds")
-    ap.add_argument("--out", default="output")
-    ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
-    ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
-    ap.add_argument("--height", type=int, default=720, help="max video height")
-    ap.add_argument("--max-minutes", type=int, default=240, help="refuse longer videos")
-    ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
-    a = ap.parse_args()
-
-    out = Path(a.out)
-    work = out / "work"
-    work.mkdir(parents=True, exist_ok=True)
-
+def short_pipeline(a, out, work):
     print("1/5 Downloading...")
-    video, info = download(a.url, work, a.cookies, a.height, a.max_minutes)
+    video, info = download(a.url, work, a.cookies, a.height)
     print("2/5 Extracting audio...")
     wav = work / "audio.wav"
     extract_audio(video, wav)
@@ -216,16 +258,74 @@ def main():
     print("  chat replay:", "found" if chat is not None else "none")
     score = build_scores(len(rms), rms, segments, info, chat)
     picks = pick_windows(score, a.length, a.num)
+    for p in picks:
+        p["video"], p["ss"] = video, p["start"]
+    return info, picks, segments
+
+
+def long_pipeline(a, out, work):
+    """For long streams: audio only -> shortlist -> transcribe the shortlist -> download only the best sections."""
+    print("1/5 Long video: downloading audio only...")
+    src, info = download_audio(a.url, work, a.cookies)
+    print("2/5 Extracting audio and measuring loudness...")
+    wav = work / "audio.wav"
+    extract_audio(src, wav)
+    src.unlink()
+    rms = loudness_per_second(wav)
+    chat = chat_scores(work, len(rms))
+    print("  chat replay:", "found" if chat is not None else "none")
+    base = build_scores(len(rms), rms, [], info, chat)
+    cands = pick_windows(base, a.length, max(a.num * 3, a.num + 4))
+    print(f"3/5 Transcribing the {len(cands)} best candidate moments only...")
+    model = load_model(a.model)
+    segments = []
+    for i, c in enumerate(cands, 1):
+        sl = work / "slice.wav"
+        run(["ffmpeg", "-y", "-ss", str(c["start"]), "-t", str(a.length), "-i", str(wav), "-c", "copy", str(sl)])
+        segs = transcribe_wav(model, sl, a.language, offset=c["start"])
+        segments += segs
+        c["score"] += 3 * sum(keyword_hits(s["text"]) for s in segs)
+        print(f"  candidate {i}/{len(cands)} done")
+    picks = sorted(sorted(cands, key=lambda c: c["score"], reverse=True)[: a.num], key=lambda c: c["start"])
+    print(f"4/5 Downloading only the {len(picks)} chosen sections of the video...")
+    for n, p in enumerate(picks, 1):
+        p["video"] = download_segment(a.url, work, n, p["start"], p["end"] + 1, a.cookies, a.height)
+        p["ss"] = 0
+    return info, picks, segments
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("url")
+    ap.add_argument("--num", type=int, default=5, help="number of clips")
+    ap.add_argument("--length", type=int, default=30, help="clip length in seconds")
+    ap.add_argument("--out", default="output")
+    ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
+    ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
+    ap.add_argument("--height", type=int, default=720, help="max video height")
+    ap.add_argument("--long-minutes", type=int, default=75, help="videos longer than this use the long-video mode")
+    ap.add_argument("--max-minutes", type=int, default=720, help="refuse videos longer than this")
+    ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
+    a = ap.parse_args()
+
+    out = Path(a.out)
+    work = out / "work"
+    work.mkdir(parents=True, exist_ok=True)
+
+    pre = probe(a.url, a.cookies, a.max_minutes)
+    long_video = (pre.get("duration") or 0) > a.long_minutes * 60
+    info, picks, segments = (long_pipeline if long_video else short_pipeline)(a, out, work)
+
     print("5/5 Cutting clips...")
     manifest = []
     for n, p in enumerate(picks, 1):
         name = f"clip_{n:02}"
         has_subs = write_srt(out / f"{name}.srt", segments, p["start"], p["end"])
-        cut_clip(video, out, name, p["start"], a.length, has_subs)
+        cut_clip(p["video"], out, name, p["ss"], a.length, has_subs)
         manifest.append({
             "file": f"{name}.mp4", "source": a.url, "source_title": info.get("title"),
-            "channel": info.get("uploader"), "source_duration": info.get("duration"), "start": p["start"], "end": p["end"],
-            "score": p["score"], "approved": False,
+            "channel": info.get("uploader"), "source_duration": info.get("duration"),
+            "start": p["start"], "end": p["end"], "score": p["score"], "approved": False,
         })
         print(f"  {name}.mp4  ({p['start']}s-{p['end']}s)")
     (out / "clips.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
