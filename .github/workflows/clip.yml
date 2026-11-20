@@ -1,0 +1,39 @@
+name: Auto clip pipeline
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"   # every 12 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write   # lets the job save processed.json back to the repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - name: Write cookies (optional)
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then echo "$YT_COOKIES" > cookies.txt; fi
+      - run: python pipeline.py
+      - name: Save processed list
+        run: |
+          git config user.name "clipper-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add processed.json
+          git diff --cached --quiet || (git commit -m "update processed videos" && git push)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clips-${{ github.run_number }}
+          path: |
+            output/**/*.mp4
+            output/index.json
