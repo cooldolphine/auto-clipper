@@ -11,7 +11,7 @@
   "min_views": 0,
   "results_per_source": 15,
   "clips_per_video": 5,
-  "clip_length_seconds": 59,
+  "clip_length_seconds": 40,
   "whisper_model": "base",
   "max_duration_minutes": 120,
   "max_height": 1080,
