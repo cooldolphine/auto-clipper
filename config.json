@@ -6,14 +6,11 @@
     "GTA 6 Graphics"
   ],
   "channels": [],
-  "min_duration_minutes": 15,
   "max_age_days": 30,
   "min_views": 0,
   "results_per_source": 15,
-  "max_videos_per_run": 3,
   "clips_per_video": 5,
   "clip_length_seconds": 30,
-  "whisper_model": "base"
   "whisper_model": "tiny",
   "max_duration_minutes": 120,
   "max_height": 720,
