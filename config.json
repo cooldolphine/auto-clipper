@@ -1,19 +1,26 @@
 {
-  "queries": [
-    "GTA 6 trailer reaction live stream",
-    "GTA 6 news live stream replay",
-    "GTA 6 Glitches",
-    "GTA 6 Graphics"
+  "channels": [
+    "https://www.youtube.com/@BeastBoyShub",
+    "https://www.youtube.com/@TechnoGamerzOfficial",
+    "https://www.youtube.com/@liveinsaan",
+    "https://www.youtube.com/@CarryisLive",
+    "https://www.youtube.com/@Mythpat"
   ],
-  "channels": [],
+  "topics": [
+    "GTA",
+    "glitch",
+    "funny"
+  ],
+  "queries": [],
   "min_duration_minutes": 15,
-  "max_age_days": 30,
+  "max_duration_minutes": 120,
+  "max_age_days": 90,
   "min_views": 0,
-  "results_per_source": 15,
+  "results_per_source": 10,
+  "max_videos_per_run": 1,
   "clips_per_video": 5,
   "clip_length_seconds": 40,
-  "whisper_model": "base",
-  "max_duration_minutes": 120,
-  "max_height": 1080,
-  "max_videos_per_run": 2
+  "language": "hi",
+  "whisper_model": "small",
+  "max_height": 1080
 }
