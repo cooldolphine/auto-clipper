@@ -53,7 +53,7 @@ def probe(url, cookies, max_minutes):
     return pre
 
 
-def download(url, workdir, cookies=None, height=720):
+def download(url, workdir, cookies=None, height=1080):
     """Short videos: download the whole video (+ live chat replay if there is one)."""
     opts = {
         **base_opts(cookies),
@@ -86,7 +86,7 @@ def download_audio(url, workdir, cookies=None):
     return src, info
 
 
-def download_segment(url, workdir, n, start, end, cookies=None, height=720):
+def download_segment(url, workdir, n, start, end, cookies=None, height=1080):
     """Long videos: download ONLY one section of the video."""
     opts = {
         **base_opts(cookies),
@@ -302,9 +302,9 @@ def main():
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
-    ap.add_argument("--height", type=int, default=720, help="max video height")
+    ap.add_argument("--height", type=int, default=1080, help="max video height")
     ap.add_argument("--long-minutes", type=int, default=75, help="videos longer than this use the long-video mode")
-    ap.add_argument("--max-minutes", type=int, default=720, help="refuse videos longer than this")
+    ap.add_argument("--max-minutes", type=int, default=1080, help="refuse videos longer than this")
     ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
     a = ap.parse_args()
 
