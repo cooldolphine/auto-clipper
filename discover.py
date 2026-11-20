@@ -11,8 +11,12 @@ from pathlib import Path
 
 import yt_dlp
 
-FLAT = {"quiet": True, "extract_flat": True, "skip_download": True}
-FULL = {"quiet": True, "skip_download": True, "noplaylist": True}
+
+def _opts(cookies, **extra):
+    o = {"quiet": True, "no_warnings": True, "skip_download": True, **extra}
+    if cookies:
+        o["cookiefile"] = cookies
+    return o
 
 
 def _extract(target, opts):
@@ -20,15 +24,14 @@ def _extract(target, opts):
         return ydl.extract_info(target, download=False)
 
 
-def _flat_ids(source, n):
-    """Return list of video ids from a search query or channel URL."""
+def _flat_entries(source, n, cookies):
+    """Return flat entries (id, duration, views...) for a search query or channel URL."""
     info, last_err = None, None
     if source.startswith("http"):
-        attempts = [(source, {**FLAT, "playlistend": n})]
+        attempts = [(source, _opts(cookies, extract_flat=True, playlistend=n))]
     else:
-        # newest-first search, then plain relevance search as a fallback.
-        # Fetch extra results because age/length filters drop many.
-        attempts = [(f"ytsearchdate{n * 2}:{source}", FLAT), (f"ytsearch{n * 2}:{source}", FLAT)]
+        flat = _opts(cookies, extract_flat=True)
+        attempts = [(f"ytsearchdate{n * 2}:{source}", flat), (f"ytsearch{n * 2}:{source}", flat)]
     for target, opts in attempts:
         try:
             info = _extract(target, opts)
@@ -39,40 +42,47 @@ def _flat_ids(source, n):
     if not info or not info.get("entries"):
         print(f"  ! no results for ({source}): {last_err or 'empty'}")
         return []
-    ids = []
-    for e in info.get("entries") or []:
-        if e and e.get("id") and len(e["id"]) == 11:
-            ids.append(e["id"])
-        elif e and e.get("entries"):  # channel tabs nest entries
-            ids += [x["id"] for x in e["entries"] if x and x.get("id")]
-    return ids[: n * 2]
+    out = []
+    for e in info["entries"]:
+        if not e:
+            continue
+        if e.get("entries"):  # channel tabs nest entries
+            out += [x for x in e["entries"] if x and x.get("id")]
+        elif e.get("id") and len(e["id"]) == 11:
+            out.append(e)
+    return out[: n * 2]
 
 
-def _details(video_id):
+def _details(video_id, cookies):
     try:
-        with yt_dlp.YoutubeDL(FULL) as ydl:
-            return ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        return _extract(f"https://www.youtube.com/watch?v={video_id}", _opts(cookies, noplaylist=True))
     except Exception:
         return None
 
 
-def discover(cfg, processed):
+def discover(cfg, processed, cookies=None):
     cutoff = datetime.utcnow() - timedelta(days=cfg["max_age_days"])
+    min_dur = cfg["min_duration_minutes"] * 60
     candidates, seen = [], set(processed)
     for src in cfg.get("queries", []) + cfg.get("channels", []):
         print(f"Searching: {src}")
-        for vid in _flat_ids(src, cfg["results_per_source"]):
+        for e in _flat_entries(src, cfg["results_per_source"], cookies):
+            vid = e["id"]
             if vid in seen:
                 continue
             seen.add(vid)
-            info = _details(vid)
-            if not info:
+            # cheap pre-filter using the search result itself (no extra request)
+            if e.get("live_status") in ("is_live", "is_upcoming"):
                 continue
-            status = info.get("live_status")
-            if status in ("is_live", "is_upcoming"):
-                print(f"  live/upcoming, skipping for now: {info.get('title')}")
-                continue  # clip it after it ends (next run picks the VOD)
-            if (info.get("duration") or 0) < cfg["min_duration_minutes"] * 60:
+            if e.get("duration") and e["duration"] < min_dur:
+                continue
+            if e.get("view_count") is not None and e["view_count"] < cfg.get("min_views", 0):
+                continue
+            # accurate check; if YouTube blocks it, fall back to the search data
+            info = _details(vid, cookies) or e
+            if info.get("live_status") in ("is_live", "is_upcoming"):
+                continue
+            if (info.get("duration") or 0) < min_dur:
                 continue
             if (info.get("view_count") or 0) < cfg.get("min_views", 0):
                 continue
@@ -80,9 +90,9 @@ def discover(cfg, processed):
             if up and datetime.strptime(up, "%Y%m%d") < cutoff:
                 continue
             candidates.append({
-                "id": vid, "url": info["webpage_url"], "title": info.get("title"),
-                "channel": info.get("uploader"), "views": info.get("view_count") or 0,
-                "duration": info.get("duration"),
+                "id": vid, "url": f"https://www.youtube.com/watch?v={vid}",
+                "title": info.get("title"), "channel": info.get("uploader") or info.get("channel"),
+                "views": info.get("view_count") or 0, "duration": info.get("duration") or 0,
             })
     candidates.sort(key=lambda c: c["views"], reverse=True)
     return candidates[: cfg["max_videos_per_run"]]
@@ -91,5 +101,6 @@ def discover(cfg, processed):
 if __name__ == "__main__":
     cfg = json.loads(Path("config.json").read_text())
     done = json.loads(Path("processed.json").read_text()) if Path("processed.json").exists() else []
-    for c in discover(cfg, done):
+    ck = "cookies.txt" if Path("cookies.txt").exists() else None
+    for c in discover(cfg, done, ck):
         print(f"{c['views']:>9} views | {c['duration']//60:>4} min | {c['channel']} | {c['title']}\n          {c['url']}")
