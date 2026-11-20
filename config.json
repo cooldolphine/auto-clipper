@@ -1,0 +1,16 @@
+{
+  "queries": [
+    "funny game glitches full stream",
+    "npc chaos gameplay",
+    "best game fails live stream"
+  ],
+  "channels": [],
+  "min_duration_minutes": 20,
+  "max_age_days": 7,
+  "results_per_source": 15,
+  "max_videos_per_run": 3,
+  "clips_per_video": 5,
+  "clip_length_seconds": 30,
+  "min_views": 1000,
+  "whisper_model": "base"
+}
