@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -32,7 +33,7 @@ def run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
-def download(url, workdir, cookies=None, height=720):
+def download(url, workdir, cookies=None, height=720, max_minutes=240):
     opts = {
         "format": f"bv*[height<={height}]+ba/b[height<={height}]",
         "outtmpl": str(workdir / "video.%(ext)s"),
@@ -44,6 +45,14 @@ def download(url, workdir, cookies=None, height=720):
     }
     if cookies:
         opts["cookiefile"] = cookies
+    # look before downloading, so we can fail with a clear reason
+    with yt_dlp.YoutubeDL({**opts, "skip_download": True, "writesubtitles": False}) as ydl:
+        pre = ydl.extract_info(url, download=False)
+    if pre.get("live_status") in ("is_live", "is_upcoming"):
+        sys.exit("ERROR: this video is still live or has not started. Clip it after the stream ends.")
+    dur = pre.get("duration") or 0
+    if dur > max_minutes * 60:
+        sys.exit(f"ERROR: this video is {dur // 3600}h {dur % 3600 // 60}m long; the limit is {max_minutes} min.")
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
     return workdir / "video.mp4", info
@@ -186,6 +195,7 @@ def main():
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
     ap.add_argument("--height", type=int, default=720, help="max video height")
+    ap.add_argument("--max-minutes", type=int, default=240, help="refuse longer videos")
     ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
     a = ap.parse_args()
 
@@ -194,7 +204,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
 
     print("1/5 Downloading...")
-    video, info = download(a.url, work, a.cookies, a.height)
+    video, info = download(a.url, work, a.cookies, a.height, a.max_minutes)
     print("2/5 Extracting audio...")
     wav = work / "audio.wav"
     extract_audio(video, wav)
