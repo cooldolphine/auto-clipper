@@ -20,14 +20,14 @@ jobs:
       - uses: denoland/setup-deno@v2   # JS runtime yt-dlp needs for YouTube
         with:
           deno-version: v2.x
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-core
       - run: pip install -r requirements.txt
       - name: Write cookies (optional)
         env:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
           if [ -n "$YT_COOKIES" ]; then echo "$YT_COOKIES" > cookies.txt; fi
-      - run: python pipeline.py
+      - run: python -u pipeline.py
       - name: Save processed list
         run: |
           git config user.name "clipper-bot"
