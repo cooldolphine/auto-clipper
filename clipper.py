@@ -28,9 +28,9 @@ def run(cmd):
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
 
-def download(url, workdir, cookies=None):
+def download(url, workdir, cookies=None, height=720):
     opts = {
-        "format": "bv*[height<=1080]+ba/b[height<=1080]",
+        "format": f"bv*[height<={height}]+ba/b[height<={height}]",
         "outtmpl": str(workdir / "video.%(ext)s"),
         "merge_output_format": "mp4",
         "quiet": True,
@@ -50,12 +50,19 @@ def extract_audio(video, wav):
 
 
 def loudness_per_second(wav):
+    """Per-second RMS loudness, computed in chunks to keep memory low."""
     with wave.open(str(wav)) as w:
-        sr = w.getframerate()
-        data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32)
-    n = len(data) // sr
-    sec = data[: n * sr].reshape(n, sr)
-    return np.sqrt((sec ** 2).mean(axis=1))
+        sr, total = w.getframerate(), w.getnframes()
+        out = []
+        while True:
+            raw = w.readframes(sr * 300)  # 5 minutes at a time
+            if not raw:
+                break
+            d = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+            n = len(d) // sr
+            if n:
+                out.append(np.sqrt((d[: n * sr].reshape(n, sr) ** 2).mean(axis=1)))
+    return np.concatenate(out) if out else np.zeros(1, dtype=np.float32)
 
 
 def transcribe(wav, model_size="base"):
@@ -173,6 +180,7 @@ def main():
     ap.add_argument("--length", type=int, default=30, help="clip length in seconds")
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
+    ap.add_argument("--height", type=int, default=720, help="max video height")
     ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
     a = ap.parse_args()
 
@@ -181,7 +189,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
 
     print("1/5 Downloading...")
-    video, info = download(a.url, work, a.cookies)
+    video, info = download(a.url, work, a.cookies, a.height)
     print("2/5 Extracting audio...")
     wav = work / "audio.wav"
     extract_audio(video, wav)
