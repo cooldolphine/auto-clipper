@@ -21,6 +21,10 @@ KEYWORDS = [
     "bug", "glitch", "broke", "broken", "crash", "died", "dead", "clip that",
     "insane", "crazy", "wait what", "how", "help", "haha", "scream", "fell",
     "explode", "exploded", "flying", "stuck", "npc",
+    # Hindi (Devanagari)
+    "हाहा", "अरे", "अबे", "पागल", "गज़ब", "गजब", "बग", "ग्लिच", "मर गया", "बचाओ", "क्या बात", "मज़ा", "मजा", "कमाल",
+    # Hinglish (Roman letters)
+    "arre", "arey", "abe", "pagal", "gazab", "kamaal", "zabardast", "mast", "maza", "kya baat", "mar gaya", "bachao",
 ]
 
 
@@ -65,13 +69,13 @@ def loudness_per_second(wav):
     return np.concatenate(out) if out else np.zeros(1, dtype=np.float32)
 
 
-def transcribe(wav, model_size="base"):
+def transcribe(wav, model_size="base", language=None):
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(wav), vad_filter=True)
+    segments, _ = model.transcribe(str(wav), vad_filter=True, language=language)
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
-CHAT_WORDS = ["lmao", "lol", "omg", "wtf", "clip", "💀", "😂", "🤣", "kek", "lmfao", "no way", "bruh"]
+CHAT_WORDS = ["pagal", "gazab", "kamaal", "haha", "हाहा", "lmao", "lol", "omg", "wtf", "clip", "💀", "😂", "🤣", "kek", "lmfao", "no way", "bruh"]
 
 
 def chat_scores(work, n_seconds):
@@ -164,7 +168,7 @@ def write_srt(path, segments, start, end):
 def cut_clip(video, outdir, name, start, length, has_subs):
     vf = "crop=ih*9/16:ih,scale=1080:1920"
     if has_subs:
-        style = "FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
+        style = "FontName=Noto Sans,FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
         vf += f",subtitles={name}.srt:force_style='{style}'"
     subprocess.run([
         "ffmpeg", "-y", "-ss", str(start), "-t", str(length), "-i", str(video.resolve()),
@@ -180,6 +184,7 @@ def main():
     ap.add_argument("--length", type=int, default=30, help="clip length in seconds")
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
+    ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
     ap.add_argument("--height", type=int, default=720, help="max video height")
     ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
     a = ap.parse_args()
@@ -195,7 +200,7 @@ def main():
     extract_audio(video, wav)
     rms = loudness_per_second(wav)
     print("3/5 Transcribing (slow on CPU)...")
-    segments = transcribe(wav, a.model)
+    segments = transcribe(wav, a.model, a.language)
     print("4/5 Scoring moments...")
     chat = chat_scores(work, len(rms))
     print("  chat replay:", "found" if chat is not None else "none")
