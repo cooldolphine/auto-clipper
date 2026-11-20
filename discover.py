@@ -56,13 +56,17 @@ def _flat_entries(source, n, cookies):
 def _details(video_id, cookies):
     try:
         return _extract(f"https://www.youtube.com/watch?v={video_id}", _opts(cookies, noplaylist=True))
-    except Exception:
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ("unavailable", "live event", "private", "members-only", "premiere", "removed")):
+            return "SKIP"  # dead/not-ready video: don't try to clip it
         return None
 
 
 def discover(cfg, processed, cookies=None):
     cutoff = datetime.utcnow() - timedelta(days=cfg["max_age_days"])
     min_dur = cfg["min_duration_minutes"] * 60
+    max_dur = cfg.get("max_duration_minutes", 180) * 60
     candidates, seen = [], set(processed)
     for src in cfg.get("queries", []) + cfg.get("channels", []):
         print(f"Searching: {src}")
@@ -74,15 +78,18 @@ def discover(cfg, processed, cookies=None):
             # cheap pre-filter using the search result itself (no extra request)
             if e.get("live_status") in ("is_live", "is_upcoming"):
                 continue
-            if e.get("duration") and e["duration"] < min_dur:
+            if e.get("duration") and not (min_dur <= e["duration"] <= max_dur):
                 continue
             if e.get("view_count") is not None and e["view_count"] < cfg.get("min_views", 0):
                 continue
             # accurate check; if YouTube blocks it, fall back to the search data
-            info = _details(vid, cookies) or e
+            info = _details(vid, cookies)
+            if info == "SKIP":
+                continue
+            info = info or e
             if info.get("live_status") in ("is_live", "is_upcoming"):
                 continue
-            if (info.get("duration") or 0) < min_dur:
+            if not (min_dur <= (info.get("duration") or 0) <= max_dur):
                 continue
             if (info.get("view_count") or 0) < cfg.get("min_views", 0):
                 continue
