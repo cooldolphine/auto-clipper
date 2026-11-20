@@ -30,7 +30,8 @@ for v in videos:
         sys.executable, "clipper.py", v["url"], "--out", str(out),
         "--num", str(cfg["clips_per_video"]), "--length", str(cfg["clip_length_seconds"]),
         "--model", cfg.get("whisper_model", "base"),
-        "--height", str(cfg.get("max_height", 720)), *cookies,
+        "--height", str(cfg.get("max_height", 720)),
+        *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
     ])
     processed.append(v["id"])  # mark even on failure so we don't loop forever
     if r.returncode == 0 and (out / "clips.json").exists():
