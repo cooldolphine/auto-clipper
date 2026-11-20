@@ -29,7 +29,7 @@ jobs:
         run: |
           git config user.name "clipper-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add processed.json
+          if [ -f processed.json ]; then git add processed.json; fi
           git diff --cached --quiet || (git commit -m "update processed videos" && git push)
       - uses: actions/upload-artifact@v4
         with:
@@ -37,3 +37,4 @@ jobs:
           path: |
             output/**/*.mp4
             output/index.json
+          if-no-files-found: ignore
