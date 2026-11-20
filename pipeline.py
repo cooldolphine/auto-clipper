@@ -40,6 +40,10 @@ for v in videos:
     pfile.write_text(json.dumps(processed, indent=1))
     index_file.write_text(json.dumps(index, indent=2))
 
+# always write state files, even when nothing was found
+pfile.write_text(json.dumps(processed, indent=1))
+index_file.write_text(json.dumps(index, indent=2))
+
 # remove big temp files (full video + wav) to save disk
 for w in Path("output").glob("*/work"):
     for f in w.glob("*"):
