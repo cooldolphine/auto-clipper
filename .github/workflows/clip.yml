@@ -1,12 +1,44 @@
 name: Auto clip pipeline
+run-name: "Clip: ${{ inputs.urls || inputs.topics || 'config.json' }}"
 
 on:
-  schedule:
-    - cron: "0 */12 * * *"   # every 12 hours
   workflow_dispatch:
+    inputs:
+      urls:
+        description: "Video links (space or comma separated). Leave empty to search."
+        required: false
+        default: ""
+      channels:
+        description: "Channel links to search in (or 'none' to search all of YouTube)"
+        required: false
+        default: ""
+      topics:
+        description: "Topics to look for (comma separated)"
+        required: false
+        default: ""
+      videos:
+        description: "How many videos to clip"
+        required: false
+        default: "1"
+      num:
+        description: "Clips per video"
+        required: false
+        default: "5"
+      length:
+        description: "Clip length in seconds"
+        required: false
+        default: "40"
+      language:
+        description: "Speech language: hi, en or auto"
+        required: false
+        default: "hi"
+      model:
+        description: "Whisper model: tiny, base or small"
+        required: false
+        default: "small"
 
 permissions:
-  contents: write   # lets the job save processed.json back to the repo
+  contents: write   # save processed.json and publish clips as a release
 
 jobs:
   run:
@@ -27,17 +59,39 @@ jobs:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
           if [ -n "$YT_COOKIES" ]; then echo "$YT_COOKIES" > cookies.txt; fi
-      - run: python -u pipeline.py
+      - name: Run clipper
+        env:
+          RUN_URLS: ${{ inputs.urls }}
+          RUN_CHANNELS: ${{ inputs.channels }}
+          RUN_TOPICS: ${{ inputs.topics }}
+          RUN_VIDEOS: ${{ inputs.videos }}
+          RUN_NUM: ${{ inputs.num }}
+          RUN_LENGTH: ${{ inputs.length }}
+          RUN_LANGUAGE: ${{ inputs.language }}
+          RUN_MODEL: ${{ inputs.model }}
+        run: python -u pipeline.py
       - name: Save processed list
         run: |
           git config user.name "clipper-bot"
           git config user.email "bot@users.noreply.github.com"
           if [ -f processed.json ]; then git add processed.json; fi
           git diff --cached --quiet || (git commit -m "update processed videos" && git push)
-      - uses: actions/upload-artifact@v4
+      - name: Publish clips to a release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ls release/*.mp4 >/dev/null 2>&1; then
+            gh release create "run-${{ github.run_number }}" release/* \
+              --title "Run ${{ github.run_number }}" --notes-file release/index.json
+          fi
+          # keep only the 10 newest releases
+          gh release list --limit 100 --json tagName -q '.[10:][].tagName' \
+            | xargs -r -I{} gh release delete {} --cleanup-tag --yes || true
+      - uses: actions/upload-artifact@v4   # backup copy in case the release step fails
+        if: always()
         with:
           name: clips-${{ github.run_number }}
-          path: |
-            output/**/*.mp4
-            output/index.json
+          path: release/*
+          retention-days: 3
           if-no-files-found: ignore
