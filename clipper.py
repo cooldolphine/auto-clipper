@@ -168,7 +168,7 @@ def write_srt(path, segments, start, end):
 def cut_clip(video, outdir, name, start, length, has_subs):
     vf = "crop=ih*9/16:ih,scale=1080:1920"
     if has_subs:
-        style = "FontName=Noto Sans,FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
+        style = "FontName=Noto Sans,FontSize=08,Bold=0,Outline=1,Alignment=2,MarginV=25"
         vf += f",subtitles={name}.srt:force_style='{style}'"
     subprocess.run([
         "ffmpeg", "-y", "-ss", str(start), "-t", str(length), "-i", str(video.resolve()),
