@@ -168,7 +168,7 @@ def write_srt(path, segments, start, end):
 def cut_clip(video, outdir, name, start, length, has_subs):
     vf = "crop=ih*9/16:ih,scale=1080:1920"
     if has_subs:
-        style = "FontName=Noto Sans,FontSize=08,Bold=0,Outline=1,Alignment=2,MarginV=25"
+        style = "FontName=Noto Sans,FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
         vf += f",subtitles={name}.srt:force_style='{style}'"
     subprocess.run([
         "ffmpeg", "-y", "-ss", str(start), "-t", str(length), "-i", str(video.resolve()),
@@ -214,7 +214,7 @@ def main():
         cut_clip(video, out, name, p["start"], a.length, has_subs)
         manifest.append({
             "file": f"{name}.mp4", "source": a.url, "source_title": info.get("title"),
-            "channel": info.get("uploader"), "start": p["start"], "end": p["end"],
+            "channel": info.get("uploader"), "source_duration": info.get("duration"), "start": p["start"], "end": p["end"],
             "score": p["score"], "approved": False,
         })
         print(f"  {name}.mp4  ({p['start']}s-{p['end']}s)")
