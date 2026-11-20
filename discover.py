@@ -6,6 +6,8 @@ No API key needed (uses yt-dlp). Run alone to preview what it would pick:
     python discover.py
 """
 import json
+import re
+from urllib.parse import quote
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -63,14 +65,52 @@ def _details(video_id, cookies):
         return None
 
 
+def _channel_base(url):
+    """https://youtube.com/@name/streams -> https://youtube.com/@name"""
+    return re.sub(r"/(videos|streams|shorts|live|featured|playlists|search|community)(/.*)?$", "", url.rstrip("/"))
+
+
+def _topic_entries(base, topic, n, cookies):
+    """Videos inside ONE channel that match a topic."""
+    ents = _flat_entries(f"{base}/search?query={quote(topic)}", n, cookies)
+    if ents:
+        return ents
+    # fallback: scan the channel's recent streams/videos and match the topic in the title
+    words = topic.lower().split()
+    found = []
+    for tab in ("streams", "videos"):
+        for e in _flat_entries(f"{base}/{tab}", 50, cookies):
+            title = (e.get("title") or "").lower()
+            if all(w in title for w in words):
+                found.append(e)
+    return found[: n * 2]
+
+
+def _jobs(cfg, cookies):
+    """List of (label, fetch_function) to run."""
+    n = cfg["results_per_source"]
+    jobs = []
+    for q in cfg.get("queries", []):
+        jobs.append((f"YouTube search '{q}'", lambda q=q: _flat_entries(q, n, cookies)))
+    topics = cfg.get("topics", [])
+    for ch in cfg.get("channels", []):
+        if topics:  # topic search INSIDE each channel
+            base = _channel_base(ch)
+            for t in topics:
+                jobs.append((f"{base} -> '{t}'", lambda b=base, t=t: _topic_entries(b, t, n, cookies)))
+        else:  # no topics: just take the channel's latest uploads
+            jobs.append((f"channel {ch}", lambda ch=ch: _flat_entries(ch, n, cookies)))
+    return jobs
+
+
 def discover(cfg, processed, cookies=None):
     cutoff = datetime.utcnow() - timedelta(days=cfg["max_age_days"])
     min_dur = cfg["min_duration_minutes"] * 60
     max_dur = cfg.get("max_duration_minutes", 180) * 60
     candidates, seen = [], set(processed)
-    for src in cfg.get("queries", []) + cfg.get("channels", []):
-        print(f"Searching: {src}")
-        for e in _flat_entries(src, cfg["results_per_source"], cookies):
+    for label, fetch in _jobs(cfg, cookies):
+        print(f"Searching: {label}")
+        for e in fetch():
             vid = e["id"]
             if vid in seen:
                 continue
