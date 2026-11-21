@@ -60,11 +60,14 @@ if os.environ.get("RUN_NUM"):
     cfg["clips_per_video"] = int(os.environ["RUN_NUM"])
 if os.environ.get("RUN_LENGTH"):
     cfg["clip_length_seconds"] = int(os.environ["RUN_LENGTH"])
+if os.environ.get("RUN_HEIGHT"):
+    cfg["max_height"] = int(os.environ["RUN_HEIGHT"])
 if os.environ.get("RUN_VIDEOS"):
     cfg["max_videos_per_run"] = int(os.environ["RUN_VIDEOS"])
 if os.environ.get("RUN_MODEL"):
     cfg["whisper_model"] = os.environ["RUN_MODEL"]
-for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook")):
+for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook"),
+                      ("RUN_AI", "ai"), ("RUN_BROLL", "broll"), ("RUN_TRANSITIONS", "transitions")):
     if os.environ.get(env_name):
         cfg[key] = os.environ[env_name]
 if os.environ.get("RUN_LANGUAGE"):
@@ -91,10 +94,14 @@ for v in videos:
         sys.executable, "clipper.py", v["url"], "--out", str(out),
         "--num", str(cfg["clips_per_video"]), "--length", str(cfg["clip_length_seconds"]),
         "--model", cfg.get("whisper_model", "base"),
-        "--height", str(cfg.get("max_height", 720)),
-        "--framing", cfg.get("framing", "center"),
+        "--height", str(cfg.get("max_height", 1080)),
+        "--framing", cfg.get("framing", "stack"),
         "--captions", cfg.get("captions", "karaoke"),
+        "--caption-margin", str(cfg.get("caption_margin", 230)),
         "--hook", cfg.get("hook", "auto"),
+        "--ai", cfg.get("ai", "on"),
+        "--broll", cfg.get("broll", "off"),
+        "--transitions", cfg.get("transitions", "off"),
         *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
     ])
     if v["id"] not in processed:
