@@ -37,9 +37,9 @@ on:
         required: false
         default: "small"
       framing:
-        description: "Vertical framing: center, blur or face"
+        description: "Vertical framing: stack, blur, face or center"
         required: false
-        default: "center"
+        default: "stack"
       captions:
         description: "Captions: karaoke, classic or off"
         required: false
@@ -48,6 +48,22 @@ on:
         description: "Headline in the first seconds: auto or off"
         required: false
         default: "auto"
+      height:
+        description: "Source video quality: 720, 1080 or 1440"
+        required: false
+        default: "1080"
+      ai:
+        description: "AI moment picking and virality scores: on or off"
+        required: false
+        default: "on"
+      broll:
+        description: "Stock footage cutaways: off or auto"
+        required: false
+        default: "off"
+      transitions:
+        description: "Fades and smooth cutaways: off or fade"
+        required: false
+        default: "off"
 
 permissions:
   contents: write   # save processed.json and publish clips as a release
@@ -84,6 +100,13 @@ jobs:
           RUN_FRAMING: ${{ inputs.framing }}
           RUN_CAPTIONS: ${{ inputs.captions }}
           RUN_HOOK: ${{ inputs.hook }}
+          RUN_HEIGHT: ${{ inputs.height }}
+          RUN_AI: ${{ inputs.ai }}
+          RUN_BROLL: ${{ inputs.broll }}
+          RUN_TRANSITIONS: ${{ inputs.transitions }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PERF_URL: ${{ vars.PERF_URL }}
         run: python -u pipeline.py
       - name: Save processed list
         if: always()
