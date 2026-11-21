@@ -36,6 +36,18 @@ on:
         description: "Whisper model: tiny, base or small"
         required: false
         default: "small"
+      framing:
+        description: "Vertical framing: center, blur or face"
+        required: false
+        default: "center"
+      captions:
+        description: "Captions: karaoke, classic or off"
+        required: false
+        default: "karaoke"
+      hook:
+        description: "Headline in the first seconds: auto or off"
+        required: false
+        default: "auto"
 
 permissions:
   contents: write   # save processed.json and publish clips as a release
@@ -69,6 +81,9 @@ jobs:
           RUN_LENGTH: ${{ inputs.length }}
           RUN_LANGUAGE: ${{ inputs.language }}
           RUN_MODEL: ${{ inputs.model }}
+          RUN_FRAMING: ${{ inputs.framing }}
+          RUN_CAPTIONS: ${{ inputs.captions }}
+          RUN_HOOK: ${{ inputs.hook }}
         run: python -u pipeline.py
       - name: Save processed list
         if: always()
