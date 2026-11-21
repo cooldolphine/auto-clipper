@@ -64,6 +64,9 @@ if os.environ.get("RUN_VIDEOS"):
     cfg["max_videos_per_run"] = int(os.environ["RUN_VIDEOS"])
 if os.environ.get("RUN_MODEL"):
     cfg["whisper_model"] = os.environ["RUN_MODEL"]
+for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook")):
+    if os.environ.get(env_name):
+        cfg[key] = os.environ[env_name]
 if os.environ.get("RUN_LANGUAGE"):
     cfg["language"] = None if os.environ["RUN_LANGUAGE"] == "auto" else os.environ["RUN_LANGUAGE"]
 
@@ -89,6 +92,9 @@ for v in videos:
         "--num", str(cfg["clips_per_video"]), "--length", str(cfg["clip_length_seconds"]),
         "--model", cfg.get("whisper_model", "base"),
         "--height", str(cfg.get("max_height", 720)),
+        "--framing", cfg.get("framing", "center"),
+        "--captions", cfg.get("captions", "karaoke"),
+        "--hook", cfg.get("hook", "auto"),
         *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
     ])
     if v["id"] not in processed:
@@ -118,7 +124,7 @@ items = []
 for c in run_clips:
     flat = c["file"].replace("/", "_")
     shutil.copy2(Path("output") / c["file"], rel / flat)
-    items.append({**c, "file": flat})
+    items.append({**c, "file": flat, "topics": [] if urls else (cfg.get("topics") or cfg.get("queries") or [])})
 (rel / "index.json").write_text(json.dumps(items, indent=1))
 
 # remove big temp files (full video + wav) to save disk
