@@ -53,7 +53,7 @@ def probe(url, cookies, max_minutes):
     return pre
 
 
-def download(url, workdir, cookies=None, height=1080):
+def download(url, workdir, cookies=None, height=720):
     """Short videos: download the whole video (+ live chat replay if there is one)."""
     opts = {
         **base_opts(cookies),
@@ -86,7 +86,7 @@ def download_audio(url, workdir, cookies=None):
     return src, info
 
 
-def download_segment(url, workdir, n, start, end, cookies=None, height=1080):
+def download_segment(url, workdir, n, start, end, cookies=None, height=720):
     """Long videos: download ONLY one section of the video."""
     opts = {
         **base_opts(cookies),
@@ -129,8 +129,13 @@ def load_model(model_size="base"):
 
 
 def transcribe_wav(model, wav, language=None, offset=0.0):
-    segments, _ = model.transcribe(str(wav), vad_filter=True, language=language)
-    return [{"start": s.start + offset, "end": s.end + offset, "text": s.text.strip()} for s in segments]
+    segments, _ = model.transcribe(str(wav), vad_filter=True, language=language, word_timestamps=True)
+    out = []
+    for s in segments:
+        words = [{"start": w.start + offset, "end": w.end + offset, "word": w.word.strip()}
+                 for w in (s.words or []) if w.word.strip()]
+        out.append({"start": s.start + offset, "end": s.end + offset, "text": s.text.strip(), "words": words})
+    return out
 
 
 def transcribe(wav, model_size="base", language=None):
@@ -232,13 +237,145 @@ def write_srt(path, segments, start, end):
     return i > 1
 
 
-def cut_clip(video, outdir, name, start, length, has_subs):
-    vf = "crop=ih*9/16:ih,scale=1080:1920"
-    if has_subs:
-        style = "FontName=Noto Sans,FontSize=08,Bold=0,Outline=1,Alignment=2,MarginV=25"
-        vf += f",subtitles={name}.srt:force_style='{style}'"
+ASS_HEAD = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Cap,Noto Sans,74,&H0000E5FF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,5,2,2,60,60,380,1
+Style: Hook,Noto Sans,64,&H00FFFFFF,&H00FFFFFF,&H00141414,&H00141414,-1,0,0,0,100,100,0,0,3,14,0,8,70,70,250,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def ass_time(t):
+    t = max(0.0, t)
+    cs = int(round(t * 100))
+    return f"{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}"
+
+
+def ass_text(t):
+    return str(t).replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ").strip()
+
+
+def chunk_words(words, max_words=4, max_dur=1.8, gap=0.6):
+    chunks, cur = [], []
+    for w in words:
+        if cur and (len(cur) >= max_words or w["start"] - cur[-1]["end"] > gap or w["end"] - cur[0]["start"] > max_dur):
+            chunks.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def write_ass_captions(path, segments, start, end):
+    """Word-by-word captions: the word being spoken lights up (karaoke style)."""
+    words = [w for s in segments for w in s.get("words", []) if start - 0.05 <= w["start"] < end]
+    if not words:
+        return False
+    lines = []
+    for chunk in chunk_words(words):
+        t0 = chunk[0]["start"] - start
+        t1 = min(chunk[-1]["end"], end) - start
+        parts = []
+        for i, w in enumerate(chunk):
+            nxt = chunk[i + 1]["start"] if i + 1 < len(chunk) else max(w["end"], w["start"] + 0.15)
+            parts.append("{\\k%d}%s" % (max(1, round((nxt - w["start"]) * 100)), ass_text(w["word"])))
+        lines.append(f"Dialogue: 0,{ass_time(t0)},{ass_time(t1 + 0.05)},Cap,,0,0,0,,{' '.join(parts)}")
+    path.write_text(ASS_HEAD + "\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def make_hook_text(title, topics=None):
+    """A short headline from the source title (English letters only)."""
+    t = re.sub(r"[\u0900-\u097F]+", " ", str(title or ""))
+    t = re.sub(r"[^\w\s'!?&-]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(re.sub(r"[^A-Za-z]", "", t)) < 4:
+        return "WAIT FOR IT"
+    if len(t) > 42:
+        t = t[:42].rsplit(" ", 1)[0]
+    return t.upper()
+
+
+def write_hook_ass(path, text, seconds=3.0):
+    path.write_text(
+        ASS_HEAD + f"Dialogue: 1,{ass_time(0.2)},{ass_time(seconds)},Hook,,0,0,0,,{{\\fad(250,350)}}{ass_text(text)}\n",
+        encoding="utf-8")
+    return True
+
+
+def face_center(video, ss, length):
+    """Median x position of the largest face over the clip (None if no steady face)."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(str(video))
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    try:
+        det = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    except Exception:
+        return None
+    if det.empty():
+        print("    face detector data not found, using a center crop")
+        return None
+    xs, t = [], 0.0
+    while t < length and W and H:
+        cap.set(cv2.CAP_PROP_POS_MSEC, (ss + t) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            break
+        small = cv2.resize(frame, (640, max(1, int(H * 640 / W))))
+        faces = det.detectMultiScale(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 1.1, 5, minSize=(40, 40))
+        if len(faces):
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            xs.append((x + w / 2) / 640 * W)
+        t += 1.0
+    cap.release()
+    if len(xs) < max(3, 0.2 * length):
+        return None
+    xs.sort()
+    return xs[len(xs) // 2], W, H
+
+
+def framing_chain(mode, video, ss, length):
+    """ffmpeg filters that turn the landscape frame into 1080x1920."""
+    if mode == "blur":  # whole frame in the middle, blurred copy behind it
+        return ("split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
+                "[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2")
+    if mode == "face":
+        found = face_center(video, ss, length)
+        if found:
+            cx, W, H = found
+            cw = int(H * 9 / 16) // 2 * 2
+            x = int(max(0, min(cx - cw / 2, W - cw)))
+            print(f"    face found, cropping around x={int(cx)}")
+            return f"crop={cw}:{H}:{x}:0,scale=1080:1920"
+        print("    no steady face, using a center crop")
+    return "crop=ih*9/16:ih,scale=1080:1920"
+
+
+CLASSIC_STYLE = "FontName=Noto Sans,FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
+
+
+def cut_clip(video, outdir, name, ss, length, vf, captions=None, hook=None):
+    """captions = ("srt"|"ass", filename), hook = ass filename."""
+    if captions:
+        kind, fn = captions
+        vf += f",subtitles={fn}" + (f":force_style='{CLASSIC_STYLE}'" if kind == "srt" else "")
+    if hook:
+        vf += f",subtitles={hook}"
     subprocess.run([
-        "ffmpeg", "-y", "-ss", str(start), "-t", str(length), "-i", str(video.resolve()),
+        "ffmpeg", "-y", "-ss", str(ss), "-t", str(length), "-i", str(Path(video).resolve()),
         "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k", f"{name}.mp4",
     ], cwd=outdir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -302,9 +439,12 @@ def main():
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
-    ap.add_argument("--height", type=int, default=1080, help="max video height")
+    ap.add_argument("--framing", default="center", choices=["center", "blur", "face"], help="how to make it vertical")
+    ap.add_argument("--captions", default="karaoke", choices=["karaoke", "classic", "off"], help="caption style")
+    ap.add_argument("--hook", default="auto", choices=["auto", "off"], help="headline in the first seconds")
+    ap.add_argument("--height", type=int, default=720, help="max video height")
     ap.add_argument("--long-minutes", type=int, default=75, help="videos longer than this use the long-video mode")
-    ap.add_argument("--max-minutes", type=int, default=1080, help="refuse videos longer than this")
+    ap.add_argument("--max-minutes", type=int, default=720, help="refuse videos longer than this")
     ap.add_argument("--cookies", default=None, help="cookies.txt for yt-dlp")
     a = ap.parse_args()
 
@@ -320,8 +460,16 @@ def main():
     manifest = []
     for n, p in enumerate(picks, 1):
         name = f"clip_{n:02}"
-        has_subs = write_srt(out / f"{name}.srt", segments, p["start"], p["end"])
-        cut_clip(p["video"], out, name, p["ss"], a.length, has_subs)
+        captions = None
+        if a.captions == "karaoke" and write_ass_captions(out / f"{name}.ass", segments, p["start"], p["end"]):
+            captions = ("ass", f"{name}.ass")
+        elif a.captions in ("classic", "karaoke") and write_srt(out / f"{name}.srt", segments, p["start"], p["end"]):
+            captions = ("srt", f"{name}.srt")  # classic style, or fallback when no word timings
+        hook = None
+        if a.hook == "auto" and write_hook_ass(out / f"{name}_hook.ass", make_hook_text(info.get("title"))):
+            hook = f"{name}_hook.ass"
+        vf = framing_chain(a.framing, p["video"], p["ss"], a.length)
+        cut_clip(p["video"], out, name, p["ss"], a.length, vf, captions, hook)
         manifest.append({
             "file": f"{name}.mp4", "source": a.url, "source_title": info.get("title"),
             "channel": info.get("uploader"), "source_duration": info.get("duration"),
