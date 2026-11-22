@@ -4,6 +4,7 @@ The AI never sees the video, only the transcript and loudness/chat signals of th
 candidate moments. It scores each one and writes an English title and headline.
 Needs a free key from Google AI Studio in the GEMINI_API_KEY secret.
 """
+import base64
 import json
 import os
 import re
@@ -71,12 +72,15 @@ def _prompt(cands, title, channel, num, want_broll, notes):
              if want_broll else "")
     return f"""You are the editor of a gaming Shorts channel. Source video: "{title}" by {channel}.
 Below are {len(cands)} candidate moments from it. The speech may be Hindi, Hinglish or English; understand it.
+Many candidates also come with 2 still frames from the video. Use them: judge what is on screen (action,
+glitches, crashes, crowds, funny facecam reactions), not only what is said.
 Pick the {num} most clip-worthy ones. Score EVERY candidate from 0 to 100 on:
 - hook_score: would it grab attention in the first 3 seconds
 - engagement: emotion, humour, surprise, chaos
 - value: is it entertaining or useful on its own, without context
 - shareability: would people share it or comment
-Also give virality (0-100, your overall judgement), a short reason (max 20 words), an English Shorts title
+Also give virality (0-100, your overall judgement), a short reason (max 20 words), "visual" (max 15 words on what is
+on screen, or "" if you saw no frames), an English Shorts title
 (max 70 characters, no hashtags) and an ALL CAPS English headline (max 32 characters) for the first 3 seconds.
 {notes}
 
@@ -84,7 +88,7 @@ CANDIDATES:
 {chr(10).join(blocks)}
 
 Return ONLY JSON in exactly this shape:
-{{"moments":[{{"id":<int>,"hook_score":<int>,"engagement":<int>,"value":<int>,"shareability":<int>,"virality":<int>,"reason":"<text>","title":"<text>","headline":"<TEXT>"{broll}}}]}}"""
+{{"moments":[{{"id":<int>,"hook_score":<int>,"engagement":<int>,"value":<int>,"shareability":<int>,"virality":<int>,"reason":"<text>","visual":"<text>","title":"<text>","headline":"<TEXT>"{broll}}}]}}"""
 
 
 def _clamp(v, lo=0, hi=100):
@@ -114,6 +118,7 @@ def _parse(text, cands):
             if q:
                 broll.append({"at": float(b.get("at", 2)), "seconds": float(b.get("seconds", 2)), "query": q[:60]})
         out[i] = {"virality": virality, "detail": detail, "reason": str(m.get("reason", ""))[:160],
+                  "visual": str(m.get("visual", ""))[:120],
                   "title": re.sub(r"[<>#]", "", str(m.get("title", "")))[:100].strip(),
                   "headline": re.sub(r"[<>]", "", str(m.get("headline", ""))).upper()[:36].strip(), "broll": broll}
     return out or None
@@ -127,7 +132,12 @@ def rank(cands, title, channel, num, want_broll=False, notes="", models=None, ke
         return None
     env_model = os.environ.get("GEMINI_MODEL")
     models = models or ([env_model] if env_model else DEFAULT_MODELS)
-    body = {"contents": [{"role": "user", "parts": [{"text": _prompt(cands, title, channel, num, want_broll, notes)}]}],
+    parts = [{"text": _prompt(cands, title, channel, num, want_broll, notes)}]
+    for c in cands:
+        for img in c.get("images") or []:
+            parts.append({"text": f"Frame from candidate [{c['id']}]:"})
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}})
+    body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4}}
     for model in models:
         for attempt in range(3):
