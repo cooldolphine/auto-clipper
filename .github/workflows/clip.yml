@@ -61,12 +61,13 @@ on:
         required: false
         default: "off"
       transitions:
-        description: "Fades and smooth cutaways: off or fade"
+        description: "Transition style: off, fade, flash, slide, wipe, zoom, circle or mix"
         required: false
         default: "off"
 
 permissions:
-  contents: write   # save processed.json and publish clips as a release
+  contents: write
+  statuses: write   # live progress for the phone app   # save processed.json and publish clips as a release
 
 jobs:
   run:
@@ -104,7 +105,9 @@ jobs:
           RUN_AI: ${{ inputs.ai }}
           RUN_BROLL: ${{ inputs.broll }}
           RUN_TRANSITIONS: ${{ inputs.transitions }}
+          GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PERF_URL: ${{ vars.PERF_URL }}
         run: python -u pipeline.py
