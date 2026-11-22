@@ -4,6 +4,7 @@
 Settings come from config.json, and can be overridden per run by the phone app
 (through the workflow inputs, passed here as RUN_* environment variables).
 """
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
+import progress
 from discover import discover
 
 
@@ -23,16 +25,16 @@ def words(name):
 
 def vid_id(url):
     m = re.search(r"(?:v=|youtu\.be/|/live/|/shorts/|/embed/)([\w-]{11})", url)
-    return m.group(1) if m else re.sub(r"\W", "", url)[-11:]
+    return m.group(1) if m else hashlib.sha1(url.encode()).hexdigest()[:11]  # Twitch, Kick, direct files...
 
 
 PROGRESS = re.compile(r"^\[download\]\s+[\d.]+% of")
 
 
-def run_clipper(cmd):
+def run_clipper(cmd, env=None):
     """Run clipper.py, hide the thousands of download-progress lines, remember the errors."""
     errors = deque(maxlen=3)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
     for line in proc.stdout:
         if PROGRESS.match(line) and "100% of" not in line:
             continue
@@ -79,6 +81,8 @@ index = json.loads(index_file.read_text()) if index_file.exists() else []
 Path("output").mkdir(exist_ok=True)
 
 cookie_file = "cookies.txt" if Path("cookies.txt").exists() else None
+progress.set_slice(0, 5)
+progress.report(0.0, "Finding videos", force=True)
 if urls:  # explicit links: clip exactly these, even if clipped before
     videos = [{"id": vid_id(u), "url": u, "title": u} for u in urls]
 else:
@@ -87,7 +91,10 @@ print(f"\n{len(videos)} video(s) to clip")
 cookies = ["--cookies", "cookies.txt"] if cookie_file else []
 
 run_clips, failures = [], []
-for v in videos:
+for i, v in enumerate(videos):
+    span = 94 / len(videos)
+    progress.set_slice(5 + span * i, span)
+    progress.report(0.0, f"Video {i + 1} of {len(videos)}: starting", force=True)
     print(f"\n=== {v['title']} ({v['url']})")
     out = Path("output") / v["id"]
     code, errs = run_clipper([
@@ -103,7 +110,7 @@ for v in videos:
         "--broll", cfg.get("broll", "off"),
         "--transitions", cfg.get("transitions", "off"),
         *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
-    ])
+    ], env={**os.environ, "PROGRESS_START": str(5 + span * i), "PROGRESS_SPAN": str(span)})
     if v["id"] not in processed:
         processed.append(v["id"])  # mark even on failure so we don't loop forever
     if code == 0 and (out / "clips.json").exists():
@@ -116,6 +123,9 @@ for v in videos:
         failures.append((v["title"] or v["url"], errs[-1] if errs else "see the log above"))
     pfile.write_text(json.dumps(processed, indent=1))
     index_file.write_text(json.dumps(index, indent=2))
+
+progress.set_slice(0, 100)
+progress.finish(bool(run_clips), "Clips ready" if run_clips else "No clips were made")
 
 if failures:
     print("\n==== WHY CLIPS WERE NOT MADE ====")
