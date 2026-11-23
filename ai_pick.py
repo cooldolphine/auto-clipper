@@ -124,49 +124,53 @@ def _parse(text, cands):
     return out or None
 
 
-def rank(cands, title, channel, num, want_broll=False, notes="", models=None, key=None):
-    """cands: [{"id", "start", "end", "text", "energy"}] -> {id: scores} or None if the AI is not available."""
+def generate(parts, parse, label="AI", models=None, key=None, timeout=120):
+    """Send parts to Gemini and return parse(answer_text), or None if the AI is not available."""
     key = key or os.environ.get("GEMINI_API_KEY")
     if not key:
-        print("  AI picking: no GEMINI_API_KEY secret, skipping")
+        print(f"  {label}: no GEMINI_API_KEY secret, skipping")
         return None
     env_model = os.environ.get("GEMINI_MODEL")
     models = models or ([env_model] if env_model else DEFAULT_MODELS)
-    parts = [{"text": _prompt(cands, title, channel, num, want_broll, notes)}]
-    for c in cands:
-        for img in c.get("images") or []:
-            parts.append({"text": f"Frame from candidate [{c['id']}]:"})
-            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}})
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4}}
     for model in models:
         for attempt in range(3):
             try:
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                                  headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=120)
+                                  headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=timeout)
             except Exception as e:
-                print(f"  AI picking: network error ({e})")
+                print(f"  {label}: network error ({e})")
                 time.sleep(5)
                 continue
             if r.status_code in (429, 500, 502, 503):
                 time.sleep(15 * (attempt + 1))
                 continue
             if r.status_code in (400, 404):
-                print(f"  AI picking: model {model} not usable ({r.status_code}), trying the next one")
+                print(f"  {label}: model {model} not usable ({r.status_code}), trying the next one")
                 break
             if r.status_code in (401, 403):
-                print("  AI picking: the Gemini key was rejected")
+                print(f"  {label}: the Gemini key was rejected")
                 return None
             if r.status_code != 200:
-                print(f"  AI picking: error {r.status_code}")
+                print(f"  {label}: error {r.status_code}")
                 break
             try:
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                res = _parse(text, cands)
+                res = parse(r.json()["candidates"][0]["content"]["parts"][0]["text"])
                 if res:
-                    print(f"  AI picking: scored {len(res)} moments with {model}")
+                    print(f"  {label}: done with {model}")
                     return res
             except Exception as e:
-                print(f"  AI picking: could not read the answer ({e})")
+                print(f"  {label}: could not read the answer ({e})")
             break
     return None
+
+
+def rank(cands, title, channel, num, want_broll=False, notes="", models=None, key=None):
+    """cands: [{"id", "start", "end", "text", "energy"}] -> {id: scores} or None if the AI is not available."""
+    parts = [{"text": _prompt(cands, title, channel, num, want_broll, notes)}]
+    for c in cands:
+        for img in c.get("images") or []:
+            parts.append({"text": f"Frame from candidate [{c['id']}]:"})
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(img).decode()}})
+    return generate(parts, lambda t: _parse(t, cands), "AI picking", models, key)
