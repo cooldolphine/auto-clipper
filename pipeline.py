@@ -69,7 +69,8 @@ if os.environ.get("RUN_VIDEOS"):
 if os.environ.get("RUN_MODEL"):
     cfg["whisper_model"] = os.environ["RUN_MODEL"]
 for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook"),
-                      ("RUN_AI", "ai"), ("RUN_BROLL", "broll"), ("RUN_TRANSITIONS", "transitions")):
+                      ("RUN_AI", "ai"), ("RUN_BROLL", "broll"), ("RUN_TRANSITIONS", "transitions"),
+                      ("RUN_DIRECTOR", "director"), ("RUN_PUNCH", "punch"), ("RUN_CUT_SILENCE", "cut_silence"), ("RUN_EMOJI", "emoji")):
     if os.environ.get(env_name):
         cfg[key] = os.environ[env_name]
 if os.environ.get("RUN_LANGUAGE"):
@@ -107,6 +108,10 @@ for i, v in enumerate(videos):
         "--caption-margin", str(cfg.get("caption_margin", 230)),
         "--hook", cfg.get("hook", "auto"),
         "--ai", cfg.get("ai", "on"),
+        "--director", cfg.get("director", "on"),
+        "--punch", cfg.get("punch", "on"),
+        "--cut-silence", cfg.get("cut_silence", "on"),
+        "--emoji", cfg.get("emoji", "on"),
         "--broll", cfg.get("broll", "off"),
         "--transitions", cfg.get("transitions", "off"),
         *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
