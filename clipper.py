@@ -19,6 +19,8 @@ from yt_dlp.utils import download_range_func
 
 import ai_pick
 import broll
+import director
+import edit
 import progress
 
 # Words that usually show up around funny / chaotic / glitchy moments
@@ -333,6 +335,40 @@ def write_ass_captions(path, segments, start, end, margin=230):
     return True
 
 
+EMPH_TAG = "\\fscx120\\fscy120\\1c&H0050FF&"   # bigger and orange-red
+EMPH_END = "{\\fscx100\\fscy100\\1c&H00E5FF&}"  # back to normal yellow
+
+
+def write_ass_words(path, words, length, margin=230, emphasis=()):
+    """Word-by-word captions at the bottom. words are clip-relative; emphasised words get bigger and red-orange."""
+    words = [w for w in words if w["start"] < length]
+    if not words:
+        return False
+    key = lambda t: re.sub(r"\W", "", str(t)).lower()
+    emph = {key(e) for e in emphasis if key(e)}
+    lines = []
+    for chunk in chunk_words(words):
+        t0 = chunk[0]["start"]
+        t1 = min(chunk[-1]["end"], length)
+        parts = []
+        for i, w in enumerate(chunk):
+            nxt = chunk[i + 1]["start"] if i + 1 < len(chunk) else max(w["end"], w["start"] + 0.15)
+            hot = key(w["word"]) in emph
+            parts.append("{\\k%d%s}%s%s" % (max(1, round((nxt - w["start"]) * 100)), EMPH_TAG if hot else "", ass_text(w["word"]),
+                                           EMPH_END if hot else ""))
+        lines.append(f"Dialogue: 0,{ass_time(t0)},{ass_time(t1 + 0.05)},Cap,,0,0,0,,{' '.join(parts)}")
+    path.write_text(ass_head(margin) + "\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def words_to_segments(words, per=6):
+    segs = []
+    for i in range(0, len(words), per):
+        g = words[i:i + per]
+        segs.append({"start": g[0]["start"], "end": g[-1]["end"], "text": " ".join(w["word"] for w in g)})
+    return segs
+
+
 def make_hook_text(title, topics=None):
     """A short headline from the source title (English letters only)."""
     t = re.sub(r"[\u0900-\u097F]+", " ", str(title or ""))
@@ -480,15 +516,23 @@ BLUR = ("[0:v]split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increas
         "[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]")
 
 
-def layout_graph(mode, video, ss, length):
-    """Returns (ffmpeg graph from [0:v] to [v0], headline-on-the-seam?, layout actually used)."""
+def with_zoom(graph, zoom):
+    """Zoom the whole 1080x1920 frame (graphs end with [v0])."""
+    if not zoom:
+        return graph
+    return graph[:-4] + "," + edit.zoom_filter(1080, 1920, zoom["at"], zoom["seconds"]) + "[v0]"
+
+
+def layout_graph(mode, video, ss, length, zoom=None):
+    """Returns (ffmpeg graph from [0:v] to [v0], headline-on-the-seam?, layout actually used).
+    zoom = {at, seconds, target} punches in on the funny moment."""
     if mode == "blur":
-        return BLUR, False, "blur"
+        return with_zoom(BLUR, zoom), False, "blur"
     if mode in ("stack", "face"):
         tr = face_track(video, ss, length)
         if not tr:
             print("    no steady face found, using the " + ("blurred layout" if mode == "stack" else "center crop"))
-            return (BLUR, False, "blur") if mode == "stack" else (CENTER, False, "center")
+            return (with_zoom(BLUR, zoom), False, "blur") if mode == "stack" else (with_zoom(CENTER, zoom), False, "center")
         W, H, fw, ts = tr["W"], tr["H"], tr["fw"], tr["t"]
         clamp = lambda v, lo, hi: max(lo, min(hi, v))
         if mode == "face":
@@ -496,7 +540,7 @@ def layout_graph(mode, video, ss, length):
             cxs = follow(tr["cx"], 0.12 * cw, 0.3 * cw)
             xe = path_expr(ts, [clamp(c - cw / 2, 0, W - cw) for c in cxs])
             print("    face found, the crop follows it")
-            return f"[0:v]crop={cw}:{H}:x='{xe}':y=0,scale=1080:1920[v0]", False, "face"
+            return with_zoom(f"[0:v]crop={cw}:{H}:x='{xe}':y=0,scale=1080:1920[v0]", zoom), False, "face"
         pw = min(W, max(fw * 3.0, H * 0.35))  # the facecam is about 3 face-widths wide
         ph = pw * TOP_H / 1080
         if ph > H:
@@ -510,10 +554,12 @@ def layout_graph(mode, video, ss, length):
         gh = int(gw * BOT_H / 1080) // 2 * 2
         gx = (W - gw) // 2
         print("    face found: face on top (the crop follows it), gameplay below")
-        graph = (f"[0:v]split[t][g];[t]crop={pw}:{ph}:x='{xe}':y='{ye}',scale=1080:{TOP_H}[top];"
-                 f"[g]crop={gw}:{gh}:{gx}:0,scale=1080:{BOT_H}[bot];[top][bot]vstack[v0]")
+        ztop = ("," + edit.zoom_filter(1080, TOP_H, zoom["at"], zoom["seconds"])) if zoom and zoom.get("target") == "face" else ""
+        zbot = ("," + edit.zoom_filter(1080, BOT_H, zoom["at"], zoom["seconds"])) if zoom and zoom.get("target") != "face" else ""
+        graph = (f"[0:v]split[t][g];[t]crop={pw}:{ph}:x='{xe}':y='{ye}',scale=1080:{TOP_H}{ztop}[top];"
+                 f"[g]crop={gw}:{gh}:{gx}:0,scale=1080:{BOT_H}{zbot}[bot];[top][bot]vstack[v0]")
         return graph, True, "stack"
-    return CENTER, False, "center"
+    return with_zoom(CENTER, zoom), False, "center"
 
 
 CLASSIC_STYLE = "FontName=Noto Sans,FontSize=08,Bold=0.5,Outline=1,Alignment=2,MarginV=25"
@@ -578,12 +624,15 @@ def xfade_parts(cur, kept, length, style):
     return parts, "xc"
 
 
-def render_clip(video, outdir, name, ss, length, graph, captions=None, hook=None, broll_items=(), transitions="off", crf=19):
+def render_clip(video, outdir, name, ss, length, graph, captions=None, hook=None, broll_items=(), transitions="off", crf=19,
+                emoji_items=(), margin=230):
     """captions = ("srt"|"ass", file), hook = ass file, broll_items = [{file, at, seconds}]."""
     kept = plan_cutaways(broll_items, length)
     inputs = ["-ss", str(ss), "-t", str(length), "-i", str(Path(video).resolve())]
     for b in kept:
         inputs += ["-t", str(b["seconds"] + 1.0), "-i", str(Path(b["file"]).resolve())]
+    for em in emoji_items:
+        inputs += ["-loop", "1", "-framerate", "30", "-t", str(em["seconds"] + 0.3), "-i", str(Path(em["file"]).resolve())]
     parts, cur = [graph], "v0"
     if kept:
         more, cur = (hard_cut_parts(cur, kept) if transitions == "off"
@@ -593,6 +642,12 @@ def render_clip(video, outdir, name, ss, length, graph, captions=None, hook=None
         color = ":color=white" if transitions == "flash" else ""
         parts.append(f"[{cur}]fade=t=in:st=0:d=0.3{color},fade=t=out:st={length - 0.3:.2f}:d=0.3[vf]")
         cur = "vf"
+    for j, em in enumerate(emoji_items):
+        idx, at, sec = 1 + len(kept) + j, em["at"], em["seconds"]
+        parts.append(f"[{idx}:v]scale=170:-1,format=rgba,fade=t=in:st=0:d=0.15:alpha=1,fade=t=out:st={sec - 0.2:.2f}:d=0.2:alpha=1,"
+                     f"setpts=PTS-STARTPTS+{at:.3f}/TB[em{j}]")
+        parts.append(f"[{cur}][em{j}]overlay=x=(W-w)/2:y=H-{margin + 330}:eof_action=pass:enable='between(t,{at:.3f},{at + sec:.3f})'[oe{j}]")
+        cur = f"oe{j}"
     if captions:
         kind, fn = captions
         parts.append(f"[{cur}]subtitles={fn}" + (f":force_style='{CLASSIC_STYLE}'" if kind == "srt" else "") + "[vc]")
@@ -657,8 +712,9 @@ def attach_text(cands, segments):
         c["text"] = " ".join(s["text"] for s in segments if s["end"] >= c["start"] and s["start"] <= c["end"]).strip()
 
 
-def choose(cands, a, info, frame_src=None):
-    """Pick the final moments: AI scores (text + still frames) if available, otherwise sound/chat/keyword scores."""
+def choose(cands, a, info, frame_src=None, k=None):
+    """First pass: AI scores (text + still frames) if available, otherwise sound/chat/keyword scores. Returns k moments."""
+    k = k or a.num
     ranked = None
     if a.ai == "on":
         progress.report(a.ai_lo, "Looking at the best moments")
@@ -666,7 +722,7 @@ def choose(cands, a, info, frame_src=None):
         items = [{"id": i, "start": c["start"], "end": c["end"], "text": c.get("text", ""), "energy": c["score"],
                   "images": c.get("images", [])} for i, c in enumerate(cands)]
         progress.report(a.ai_lo + 0.03, "AI is scoring the moments")
-        ranked = ai_pick.rank(items, info.get("title"), info.get("uploader"), a.num, a.broll == "auto",
+        ranked = ai_pick.rank(items, info.get("title"), info.get("uploader"), k, a.broll == "auto",
                               ai_pick.performance_notes())
         if not ranked:
             print("  AI picking not available, using the sound/chat/keyword picks")
@@ -675,13 +731,60 @@ def choose(cands, a, info, frame_src=None):
             r = ranked.get(i)
             if r:
                 c.update(virality=r["virality"], detail=r["detail"], reason=r["reason"], ai_title=r["title"],
-                         headline=r["headline"], broll=r["broll"], visual=r.get("visual", ""))
-        top = sorted(cands, key=lambda c: (c.get("virality", -1), c["score"]), reverse=True)[: a.num]
+                         headline=r["headline"], visual=r.get("visual", ""),
+                         broll=[{"at": c["start"] + b["at"], "seconds": b["seconds"], "query": b["query"]} for b in r["broll"]])
+        top = sorted(cands, key=lambda c: (c.get("virality", -1), c["score"]), reverse=True)[:k]
     else:
-        top = sorted(cands, key=lambda c: c["score"], reverse=True)[: a.num]
+        top = sorted(cands, key=lambda c: c["score"], reverse=True)[:k]
     for c in cands:
         c.pop("images", None)
     return sorted(top, key=lambda c: c["start"])
+
+
+def lines_for(segments, t0, t1):
+    """Speech with times (seconds from t0) for the director."""
+    words = [{"start": w["start"] - t0, "end": w["end"] - t0, "word": w["word"]}
+             for s in segments for w in s.get("words", []) if t0 <= w["start"] < t1]
+    return "\n".join(f"[{ch[0]['start']:.1f}] " + " ".join(w["word"] for w in ch) for ch in chunk_words(words, 6, 3.0, 0.8))
+
+
+def direct(finalists, a, info, segments, work):
+    """Second pass (the director): Gemini watches a preview of each finalist, then we apply its exact cut,
+    edit cues and title/description/tags. Returns the final picks."""
+    ctx = a.ctx
+    total = info.get("duration") or 10 ** 9
+    pad = 6.0
+    items = []
+    for i, f in enumerate(finalists):
+        pv0 = max(0.0, f["start"] - pad)
+        pv1 = min(float(total), f["end"] + pad)
+        progress.report(a.ai_lo + 0.04 + 0.08 * i / max(1, len(finalists)), f"Making a preview of moment {i + 1} of {len(finalists)}")
+        prev = director.make_preview(ctx["src"], work / f"preview_{i}.mp4", pv0, pv1 - pv0, ctx["headers"],
+                                     ctx["wav"] if ctx["audio_sep"] else None)
+        items.append({"id": i, "dur": pv1 - pv0, "pv0": pv0, "preview": prev, "lines": lines_for(segments, pv0, pv1)})
+    print(f"  previews ready: {sum(1 for x in items if x['preview'])} of {len(items)}")
+    progress.report(a.ai_lo + 0.13, "The AI director is watching the moments")
+    res = director.review(items, info.get("title"), info.get("uploader"), a.broll == "auto", ai_pick.performance_notes()) or {}
+    for it, f in zip(items, finalists):
+        r = res.get(it["id"])
+        if not r:
+            continue
+        pv0 = it["pv0"]
+        f.update(start=pv0 + r["start"], end=pv0 + r["end"], peak=pv0 + r["peak"], director=True, keep=r["keep"],
+                 funny=r["funny"], virality=r["virality"], reason=r["reason"] or f.get("reason"), visual=r["visual"] or f.get("visual"),
+                 headline=r["headline"] or f.get("headline"), game=r["game"], titles=r["titles"], description=r["description"],
+                 tags=r["tags"], emphasis=r["emphasis"], emoji=[{"at": pv0 + e["at"], "emoji": e["emoji"]} for e in r["emoji"]])
+        f["zoom"] = r["zoom"] and {**r["zoom"], "at": pv0 + r["zoom"]["at"]}
+        f["slowmo"] = r["slowmo"] and {**r["slowmo"], "at": pv0 + r["slowmo"]["at"]}
+        if a.broll == "auto":
+            f["broll"] = [{**b, "at": pv0 + b["at"]} for b in r["broll"]]
+    pool = [f for f in finalists if f.get("keep", True)] or finalists
+    rank_key = lambda f: (f.get("funny", f.get("virality", 0) or 0) * 0.6 + (f.get("virality") or 0) * 0.4, f["score"])
+    top = sorted(pool, key=rank_key, reverse=True)[: a.num]
+    if len(top) < a.num:  # not enough kept: fill with the best of the rest
+        rest = [f for f in finalists if f not in top]
+        top += sorted(rest, key=rank_key, reverse=True)[: a.num - len(top)]
+    return sorted(top, key=lambda f: f["start"])
 
 
 def short_pipeline(a, out, work):
@@ -693,6 +796,8 @@ def short_pipeline(a, out, work):
     progress.report(0.31, "Extracting audio")
     wav = work / "audio.wav"
     extract_audio(video, wav)
+    a.wav = wav
+    a.ctx = {"src": str(video), "headers": None, "wav": wav, "audio_sep": False}
     rms = loudness_per_second(wav)
     print("3/5 Transcribing (slow on CPU)...")
     tstage = progress.stage(0.34, 0.65)
@@ -703,7 +808,10 @@ def short_pipeline(a, out, work):
     score = build_scores(len(rms), rms, segments, info, chat)
     cands = pick_windows(score, a.length, max(a.num * 3, a.num + 4))
     attach_text(cands, segments)
-    picks = choose(cands, a, info, (str(video), None))
+    use_director = a.ai == "on" and a.director == "on"
+    picks = choose(cands, a, info, (str(video), None), k=(a.num + 3) if use_director else None)
+    if use_director:
+        picks = direct(picks, a, info, segments, work)
     for p in picks:
         p["video"], p["ss"] = video, p["start"]
     return info, picks, segments
@@ -720,6 +828,7 @@ def long_pipeline(a, out, work):
     wav = work / "audio.wav"
     extract_audio(src, wav)
     src.unlink()
+    a.wav = wav
     rms = loudness_per_second(wav)
     chat = chat_scores(work, len(rms))
     print("  chat replay:", "found" if chat is not None else "none")
@@ -731,13 +840,18 @@ def long_pipeline(a, out, work):
     for i, c in enumerate(cands, 1):
         progress.report(0.20 + 0.30 * (i - 1) / len(cands), f"Transcribing moment {i} of {len(cands)}")
         sl = work / "slice.wav"
-        run(["ffmpeg", "-y", "-ss", str(c["start"]), "-t", str(a.length), "-i", str(wav), "-c", "copy", str(sl)])
-        segs = transcribe_wav(model, sl, a.language, offset=c["start"])
+        run(["ffmpeg", "-y", "-ss", str(max(0, c["start"] - 6)), "-t", str(a.length + 12), "-i", str(wav), "-c", "copy", str(sl)])
+        segs = transcribe_wav(model, sl, a.language, offset=max(0, c["start"] - 6))
         segments += segs
-        c["score"] += 3 * sum(keyword_hits(s["text"]) for s in segs)
+        c["score"] += 3 * sum(keyword_hits(s["text"]) for s in segs if s["end"] >= c["start"] and s["start"] <= c["end"])
         print(f"  candidate {i}/{len(cands)} done")
     attach_text(cands, segments)
-    picks = choose(cands, a, info, remote_source(info))
+    remote = remote_source(info)
+    a.ctx = {"src": remote[0] if remote else None, "headers": remote[1] if remote else None, "wav": wav, "audio_sep": True}
+    use_director = a.ai == "on" and a.director == "on" and remote is not None
+    picks = choose(cands, a, info, remote, k=(a.num + 3) if use_director else None)
+    if use_director:
+        picks = direct(picks, a, info, segments, work)
     print(f"4/5 Downloading only the {len(picks)} chosen sections of the video...")
     for n, p in enumerate(picks, 1):
         progress.report(0.62 + 0.17 * (n - 1) / max(1, len(picks)), f"Downloading section {n} of {len(picks)}")
@@ -746,11 +860,64 @@ def long_pipeline(a, out, work):
     return info, picks, segments
 
 
+def to_rel(cue, start):
+    return cue and {**cue, "at": cue["at"] - start}
+
+
+def clip_edits(a, p, segments, work, name, out):
+    """Everything between 'we know the moment' and 'ready to style': cut silence, slow motion, cues.
+    Returns (video, ss, length, timeline, words_new, cues)."""
+    length = p["end"] - p["start"]
+    words = [{"start": w["start"] - p["start"], "end": w["end"] - p["start"], "word": w["word"]}
+             for s in segments for w in s.get("words", []) if p["start"] - 0.05 <= w["start"] < p["end"]]
+    rms, step = edit.rms_track(a.wav, p["start"], p["end"])
+    zoom, slowmo = None, None
+    if a.punch == "on":
+        zoom, slowmo = to_rel(p.get("zoom"), p["start"]), to_rel(p.get("slowmo"), p["start"])
+        if not zoom and not slowmo:  # no AI cue: use the loudest moment
+            peak = edit.plan_peak(rms, step, length)
+            zoom, slowmo = {"at": max(0.5, peak - 0.3), "seconds": 1.6, "target": "gameplay"}, {"at": max(0.5, peak - 0.1), "seconds": 1.2}
+    cuts = []
+    if a.cut_silence == "on":
+        protect = [(c["at"] - 0.3, c["at"] + c["seconds"] + 0.3) for c in (zoom, slowmo) if c]
+        cuts = edit.plan_cuts(words, rms, step, length, protect)
+    slows = []
+    if slowmo:
+        s0 = max(0.0, min(slowmo["at"], length - 1.0))
+        slows = [(s0, min(length, s0 + slowmo["seconds"]), 0.5)]
+    tl = edit.Timeline(length, cuts, slows)
+    if tl.identity:
+        video, ss, new_len = p["video"], p["ss"], length
+    else:
+        raw = out / f"{name}_raw.mp4"
+        edit.assemble(p["video"], raw, p["ss"], length, tl)
+        video, ss, new_len = raw, 0, tl.total
+    mwords = [{"start": tl.map(w["start"]), "end": max(tl.map(w["end"]), tl.map(w["start"]) + 0.05), "word": w["word"]} for w in words]
+    mzoom = None
+    if zoom:
+        t0 = tl.map(zoom["at"])
+        mzoom = {"at": t0, "seconds": max(0.8, tl.map(min(length, zoom["at"] + zoom["seconds"])) - t0), "target": zoom.get("target", "gameplay")}
+    emph, emoji = [], []
+    if a.emoji == "on":
+        emph = p.get("emphasis") or edit.loud_words(words, rms, step)
+        for e in p.get("emoji") or []:
+            at = e["at"] - p["start"]
+            if 0.5 <= at <= length - 1.0:
+                emoji.append({"at": tl.map(at), "emoji": e["emoji"], "seconds": 1.4})
+    broll_items = []
+    for b in p.get("broll") or []:
+        at = b["at"] - p["start"]
+        if 1.0 <= at <= length - 3.0:
+            broll_items.append({"at": tl.map(at), "seconds": b["seconds"], "query": b["query"]})
+    return video, ss, new_len, tl, mwords, {"zoom": mzoom, "emphasis": emph, "emoji": emoji, "broll": broll_items,
+                                            "cuts": len(cuts), "slowmo": bool(slows)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
     ap.add_argument("--num", type=int, default=5, help="number of clips")
-    ap.add_argument("--length", type=int, default=30, help="clip length in seconds")
+    ap.add_argument("--length", type=int, default=30, help="length of the first-pass windows in seconds")
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
@@ -759,6 +926,10 @@ def main():
     ap.add_argument("--caption-margin", type=int, default=230, help="caption distance from the bottom edge (pixels of 1920)")
     ap.add_argument("--hook", default="auto", choices=["auto", "off"], help="headline in the first seconds")
     ap.add_argument("--ai", default="on", choices=["on", "off"], help="AI moment picking and virality scores")
+    ap.add_argument("--director", default="on", choices=["on", "off"], help="AI director: watches previews, cuts exactly, writes titles")
+    ap.add_argument("--punch", default="on", choices=["on", "off"], help="zoom and slow motion on the funny moment")
+    ap.add_argument("--cut-silence", default="on", choices=["on", "off"], help="remove silent gaps")
+    ap.add_argument("--emoji", default="on", choices=["on", "off"], help="emoji pop-ups and highlighted words")
     ap.add_argument("--broll", default="off", choices=["off", "auto"], help="stock footage cutaways (needs AI picking)")
     ap.add_argument("--transitions", default="off", choices=["off", "fade", "flash", "slide", "wipe", "zoom", "circle", "mix"],
                     help="fades at the ends, and the style used for stock footage cutaways")
@@ -780,36 +951,48 @@ def main():
     print("5/5 Cutting clips...")
     manifest = []
     for n, p in enumerate(picks, 1):
-        progress.report(a.cut_lo + (1 - a.cut_lo) * (n - 1) / max(1, len(picks)), f"Cutting clip {n} of {len(picks)}")
+        progress.report(a.cut_lo + (1 - a.cut_lo) * (n - 1) / max(1, len(picks)), f"Editing clip {n} of {len(picks)}")
         name = f"clip_{n:02}"
-        graph, seam, used = layout_graph(a.framing, p["video"], p["ss"], a.length)
+        video, ss, length, tl, mwords, cues = clip_edits(a, p, segments, work, name, out)
+        graph, seam, used = layout_graph(a.framing, video, ss, length, cues["zoom"])
         captions = None
-        if a.captions == "karaoke" and write_ass_captions(out / f"{name}.ass", segments, p["start"], p["end"], a.caption_margin):
+        if a.captions == "karaoke" and write_ass_words(out / f"{name}.ass", mwords, length, a.caption_margin, cues["emphasis"]):
             captions = ("ass", f"{name}.ass")
-        elif a.captions in ("classic", "karaoke") and write_srt(out / f"{name}.srt", segments, p["start"], p["end"]):
-            captions = ("srt", f"{name}.srt")  # classic style, or fallback when no word timings
+        elif a.captions in ("classic", "karaoke") and mwords:
+            (out / f"{name}.srt").write_text("", encoding="utf-8")
+            if write_srt(out / f"{name}.srt", words_to_segments(mwords), 0, length):
+                captions = ("srt", f"{name}.srt")  # classic style, or fallback when no word timings
         headline = p.get("headline") or make_hook_text(info.get("title"))
         hook = None
         if a.hook == "auto" and write_hook_ass(out / f"{name}_hook.ass", headline, seam=seam):
             hook = f"{name}_hook.ass"
         broll_items = []
         if a.broll == "auto":
-            for k, b in enumerate(p.get("broll", [])[:2], 1):
-                secs = max(2.0, min(3.5, b["seconds"]))
-                at = max(1.0, min(a.length - secs - 1, b["at"]))
-                f = broll.fetch(b["query"], work / f"broll_{n}_{k}.mp4", secs)
+            for k, b in enumerate(cues["broll"][:2], 1):
+                f = broll.fetch(b["query"], work / f"broll_{n}_{k}.mp4", b["seconds"])
                 if f:
-                    broll_items.append({"file": f, "at": round(at, 2), "seconds": secs, "query": b["query"]})
-        render_clip(p["video"], out, name, p["ss"], a.length, graph, captions, hook, broll_items, a.transitions)
+                    broll_items.append({"file": f, "at": round(b["at"], 2), "seconds": b["seconds"], "query": b["query"]})
+        emoji_items = []
+        for e in cues["emoji"]:
+            f = edit.emoji_file(e["emoji"], work)
+            if f:
+                emoji_items.append({"file": f, "at": e["at"], "seconds": e["seconds"]})
+        render_clip(video, out, name, ss, length, graph, captions, hook, broll_items, a.transitions,
+                    emoji_items=emoji_items, margin=a.caption_margin)
+        (out / f"{name}_raw.mp4").unlink(missing_ok=True)
         manifest.append({
             "file": f"{name}.mp4", "source": a.url, "source_title": info.get("title"),
             "channel": info.get("uploader"), "source_duration": info.get("duration"),
-            "start": p["start"], "end": p["end"], "score": p["score"], "approved": False,
+            "start": p["start"], "end": p["end"], "length": round(length, 1), "score": p["score"], "approved": False,
             "virality": p.get("virality"), "virality_detail": p.get("detail"), "reason": p.get("reason"),
             "visual": p.get("visual"), "ai_title": p.get("ai_title"), "hook": headline, "layout": used,
+            "ai_titles": p.get("titles") or ([p["ai_title"]] if p.get("ai_title") else []),
+            "ai_description": p.get("description"), "ai_tags": p.get("tags") or [], "game": p.get("game"),
+            "edits": {"cuts": cues["cuts"], "slowmo": cues["slowmo"], "zoom": bool(cues["zoom"]), "emoji": len(emoji_items),
+                      "highlighted": len(cues["emphasis"])},
             "broll": [{"query": b["query"], "at": b["at"]} for b in broll_items],
         })
-        print(f"  {name}.mp4  ({p['start']}s-{p['end']}s)" + (f"  virality {p['virality']}" if p.get("virality") is not None else ""))
+        print(f"  {name}.mp4  ({p['start']:.1f}s-{p['end']:.1f}s, {length:.1f}s)" + (f"  virality {p['virality']}" if p.get("virality") is not None else ""))
     (out / "clips.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     progress.report(1.0, "Clips ready", force=True)
     print(f"Done. {len(manifest)} clips in {out}/")
