@@ -64,6 +64,22 @@ on:
         description: "Transition style: off, fade, flash, slide, wipe, zoom, circle or mix"
         required: false
         default: "off"
+      director:
+        description: "AI director (watches previews, cuts exactly, writes titles): on or off"
+        required: false
+        default: "on"
+      punch:
+        description: "Zoom and slow motion on the funny moment: on or off"
+        required: false
+        default: "on"
+      cut_silence:
+        description: "Remove silent gaps: on or off"
+        required: false
+        default: "on"
+      emoji:
+        description: "Emoji pop-ups and highlighted words: on or off"
+        required: false
+        default: "on"
 
 permissions:
   contents: write
@@ -105,6 +121,10 @@ jobs:
           RUN_AI: ${{ inputs.ai }}
           RUN_BROLL: ${{ inputs.broll }}
           RUN_TRANSITIONS: ${{ inputs.transitions }}
+          RUN_DIRECTOR: ${{ inputs.director }}
+          RUN_PUNCH: ${{ inputs.punch }}
+          RUN_CUT_SILENCE: ${{ inputs.cut_silence }}
+          RUN_EMOJI: ${{ inputs.emoji }}
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
@@ -113,11 +133,18 @@ jobs:
         run: python -u pipeline.py
       - name: Save processed list
         if: always()
+        continue-on-error: true   # a busy repo must never turn a good run red
         run: |
           git config user.name "clipper-bot"
           git config user.email "bot@users.noreply.github.com"
           if [ -f processed.json ]; then git add processed.json; fi
-          git diff --cached --quiet || (git commit -m "update processed videos" && git push)
+          if ! git diff --cached --quiet; then
+            git commit -m "update processed videos"
+            for i in 1 2 3 4; do
+              git pull --rebase --autostash && git push && break
+              sleep 3
+            done
+          fi
       - name: Publish clips to a release
         if: always()
         env:
