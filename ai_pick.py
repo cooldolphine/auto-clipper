@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 
 import requests
 
-DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-2.5-flash"]
+DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest",
+                  "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 PERF_URL_DEFAULT = "https://raw.githubusercontent.com/cooldolphine/clipper-app/main/performance.json"
 
 
@@ -124,44 +125,60 @@ def _parse(text, cands):
     return out or None
 
 
+def _err(r):
+    try:
+        return str(r.json()["error"]["message"])[:300]
+    except Exception:
+        return str(getattr(r, "text", ""))[:300]
+
+
 def generate(parts, parse, label="AI", models=None, key=None, timeout=120):
     """Send parts to Gemini and return parse(answer_text), or None if the AI is not available."""
     key = key or os.environ.get("GEMINI_API_KEY")
     if not key:
         print(f"  {label}: no GEMINI_API_KEY secret, skipping")
         return None
-    env_model = os.environ.get("GEMINI_MODEL")
-    models = models or ([env_model] if env_model else DEFAULT_MODELS)
+    env_model = (os.environ.get("GEMINI_MODEL") or "").strip()
+    models = models or ([env_model] if env_model else []) + DEFAULT_MODELS
     body = {"contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4}}
     for model in models:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                   headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=timeout)
             except Exception as e:
-                print(f"  {label}: network error ({e})")
-                time.sleep(5)
-                continue
-            if r.status_code in (429, 500, 502, 503):
-                time.sleep(15 * (attempt + 1))
+                print(f"  {label}: {model}: network error or timeout ({type(e).__name__})")
+                break  # a slow model: try the next one instead of waiting again
+            if r.status_code == 429:
+                msg = _err(r)
+                print(f"  {label}: {model} is over its limit: {msg[:160]}")
+                if attempt == 0 and "limit: 0" not in msg and "per day" not in msg.lower() and "retry" in msg.lower():
+                    time.sleep(20)
+                    continue
+                break
+            if r.status_code in (500, 502, 503):
+                print(f"  {label}: {model} is busy ({r.status_code})")
+                time.sleep(10)
                 continue
             if r.status_code in (400, 404):
-                print(f"  {label}: model {model} not usable ({r.status_code}), trying the next one")
+                print(f"  {label}: {model} not usable ({r.status_code}): {_err(r)[:160]}")
                 break
             if r.status_code in (401, 403):
-                print(f"  {label}: the Gemini key was rejected")
+                print(f"  {label}: the Gemini key was rejected ({r.status_code}): {_err(r)[:160]}")
                 return None
             if r.status_code != 200:
-                print(f"  {label}: error {r.status_code}")
+                print(f"  {label}: {model} error {r.status_code}: {_err(r)[:160]}")
                 break
             try:
                 res = parse(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-                if res:
-                    print(f"  {label}: done with {model}")
-                    return res
             except Exception as e:
-                print(f"  {label}: could not read the answer ({e})")
+                print(f"  {label}: {model} gave an answer I could not read ({type(e).__name__}: {e})")
+                break
+            if res:
+                print(f"  {label}: done with {model}")
+                return res
+            print(f"  {label}: {model} answered, but with nothing usable")
             break
     return None
 
