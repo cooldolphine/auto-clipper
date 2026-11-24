@@ -121,6 +121,52 @@ def download_audio(url, workdir, cookies=None, stage=None):
     return src, info
 
 
+def pick_formats(info, height):
+    """Best video (<= height) and best audio stream URLs from yt-dlp's format list."""
+    fm = [f for f in (info.get("formats") or []) if f.get("url")]
+    is_v = lambda f: f.get("vcodec") not in (None, "none")
+    is_a = lambda f: f.get("acodec") not in (None, "none")
+    vids = [f for f in fm if is_v(f) and not is_a(f) and 0 < (f.get("height") or 0) <= height and (f.get("protocol") or "").startswith("http")]
+    vids = vids or [f for f in fm if is_v(f) and 0 < (f.get("height") or 0) <= height]
+    best_v = max(vids, key=lambda f: (f.get("height") or 0, str(f.get("vcodec", "")).startswith("avc1"), f.get("tbr") or 0), default=None)
+    if best_v is None or is_a(best_v):
+        return best_v, None
+    auds = [f for f in fm if is_a(f) and not is_v(f)]
+    best_a = max(auds, key=lambda f: (f.get("ext") == "m4a", f.get("abr") or f.get("tbr") or 0), default=None)
+    return best_v, best_a
+
+
+def fetch_section(info, out_path, start, end, height):
+    """Cut [start, end] of the video straight from the stream URLs with ffmpeg. Returns the path or None."""
+    v, au = pick_formats(info, height)
+    if not v:
+        return None
+    dur = end - start
+
+    def src(f):
+        cmd = ["-ss", f"{start:.2f}", "-t", f"{dur:.2f}"]
+        if f.get("http_headers"):
+            cmd += ["-headers", "".join(f"{k}: {x}\r\n" for k, x in f["http_headers"].items())]
+        return cmd + ["-i", f["url"]]
+
+    cmd = ["ffmpeg", "-y", "-v", "error"] + src(v)
+    if au:
+        cmd += src(au) + ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", str(out_path)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=900)
+    except Exception:
+        return None
+    p = Path(out_path)
+    if r.returncode != 0 or not p.exists() or p.stat().st_size < 10000:
+        print("    ffmpeg said:", r.stderr.decode(errors="ignore").strip()[-200:])
+        return None
+    return p
+
+
 def download_segment(url, workdir, n, start, end, cookies=None, height=1080):
     """Long videos: download ONLY one section of the video."""
     opts = {
@@ -716,24 +762,25 @@ def choose(cands, a, info, frame_src=None, k=None):
     """First pass: AI scores (text + still frames) if available, otherwise sound/chat/keyword scores. Returns k moments."""
     k = k or a.num
     ranked = None
+    pool = sorted(cands, key=lambda c: c["score"], reverse=True)[:12]  # the AI judges the 12 most promising
     if a.ai == "on":
         progress.report(a.ai_lo, "Looking at the best moments")
-        add_frames(cands, a.length, frame_src)
+        add_frames(pool, a.length, frame_src)
         items = [{"id": i, "start": c["start"], "end": c["end"], "text": c.get("text", ""), "energy": c["score"],
-                  "images": c.get("images", [])} for i, c in enumerate(cands)]
+                  "images": c.get("images", [])} for i, c in enumerate(pool)]
         progress.report(a.ai_lo + 0.03, "AI is scoring the moments")
         ranked = ai_pick.rank(items, info.get("title"), info.get("uploader"), k, a.broll == "auto",
                               ai_pick.performance_notes())
         if not ranked:
             print("  AI picking not available, using the sound/chat/keyword picks")
     if ranked:
-        for i, c in enumerate(cands):
+        for i, c in enumerate(pool):
             r = ranked.get(i)
             if r:
                 c.update(virality=r["virality"], detail=r["detail"], reason=r["reason"], ai_title=r["title"],
                          headline=r["headline"], visual=r.get("visual", ""),
                          broll=[{"at": c["start"] + b["at"], "seconds": b["seconds"], "query": b["query"]} for b in r["broll"]])
-        top = sorted(cands, key=lambda c: (c.get("virality", -1), c["score"]), reverse=True)[:k]
+        top = sorted(pool, key=lambda c: (c.get("virality", -1), c["score"]), reverse=True)[:k]
     else:
         top = sorted(cands, key=lambda c: c["score"], reverse=True)[:k]
     for c in cands:
@@ -853,11 +900,22 @@ def long_pipeline(a, out, work):
     if use_director:
         picks = direct(picks, a, info, segments, work)
     print(f"4/5 Downloading only the {len(picks)} chosen sections of the video...")
+    ok = []
     for n, p in enumerate(picks, 1):
         progress.report(0.62 + 0.17 * (n - 1) / max(1, len(picks)), f"Downloading section {n} of {len(picks)}")
-        p["video"] = download_segment(a.url, work, n, p["start"], p["end"] + 1, a.cookies, a.height)
-        p["ss"] = 0
-    return info, picks, segments
+        path = fetch_section(info, work / f"seg_{n:02}.mp4", p["start"], p["end"] + 1, a.height)
+        if not path:
+            print(f"  section {n}: direct download failed, trying yt-dlp")
+            try:
+                path = download_segment(a.url, work, n, p["start"], p["end"] + 1, a.cookies, a.height)
+            except Exception as e:
+                print(f"  section {n}: could not be downloaded ({str(e)[:160]}), skipping it")
+                continue
+        p["video"], p["ss"] = path, 0
+        ok.append(p)
+    if not ok:
+        raise RuntimeError("none of the chosen sections could be downloaded")
+    return info, ok, segments
 
 
 def to_rel(cue, start):
