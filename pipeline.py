@@ -115,7 +115,7 @@ for i, v in enumerate(videos):
         "--broll", cfg.get("broll", "off"),
         "--transitions", cfg.get("transitions", "off"),
         *(["--language", cfg["language"]] if cfg.get("language") else []), *cookies,
-    ], env={**os.environ, "PROGRESS_START": str(5 + span * i), "PROGRESS_SPAN": str(span)})
+    ], env={**os.environ, "PYTHONUNBUFFERED": "1", "PROGRESS_START": str(5 + span * i), "PROGRESS_SPAN": str(span)})
     if v["id"] not in processed:
         processed.append(v["id"])  # mark even on failure so we don't loop forever
     if code == 0 and (out / "clips.json").exists():
