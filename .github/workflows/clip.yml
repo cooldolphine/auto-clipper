@@ -80,6 +80,10 @@ on:
         description: "Emoji pop-ups and highlighted words: on or off"
         required: false
         default: "on"
+      facecam:
+        description: "Where the facecam is: auto, tl, tr, bl, br or none"
+        required: false
+        default: "auto"
 
 permissions:
   contents: write
@@ -125,9 +129,12 @@ jobs:
           RUN_PUNCH: ${{ inputs.punch }}
           RUN_CUT_SILENCE: ${{ inputs.cut_silence }}
           RUN_EMOJI: ${{ inputs.emoji }}
+          RUN_FACECAM: ${{ inputs.facecam }}
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PERF_URL: ${{ vars.PERF_URL }}
