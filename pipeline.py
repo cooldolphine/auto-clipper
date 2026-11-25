@@ -70,7 +70,8 @@ if os.environ.get("RUN_MODEL"):
     cfg["whisper_model"] = os.environ["RUN_MODEL"]
 for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook"),
                       ("RUN_AI", "ai"), ("RUN_BROLL", "broll"), ("RUN_TRANSITIONS", "transitions"),
-                      ("RUN_DIRECTOR", "director"), ("RUN_PUNCH", "punch"), ("RUN_CUT_SILENCE", "cut_silence"), ("RUN_EMOJI", "emoji")):
+                      ("RUN_DIRECTOR", "director"), ("RUN_PUNCH", "punch"), ("RUN_CUT_SILENCE", "cut_silence"), ("RUN_EMOJI", "emoji"),
+                      ("RUN_FACECAM", "facecam")):
     if os.environ.get(env_name):
         cfg[key] = os.environ[env_name]
 if os.environ.get("RUN_LANGUAGE"):
@@ -109,6 +110,8 @@ for i, v in enumerate(videos):
         "--hook", cfg.get("hook", "auto"),
         "--ai", cfg.get("ai", "on"),
         "--director", cfg.get("director", "on"),
+        "--facecam", cfg.get("facecam", "auto"),
+        "--facecam-size", str(cfg.get("facecam_size", 0.26)),
         "--punch", cfg.get("punch", "on"),
         "--cut-silence", cfg.get("cut_silence", "on"),
         "--emoji", cfg.get("emoji", "on"),
@@ -147,6 +150,10 @@ for c in run_clips:
     flat = c["file"].replace("/", "_")
     shutil.copy2(Path("output") / c["file"], rel / flat)
     items.append({**c, "file": flat, "topics": [] if urls else (cfg.get("topics") or cfg.get("queries") or [])})
+for v in videos:
+    chk = Path("output") / v["id"] / "facecam_check.jpg"
+    if chk.exists():
+        shutil.copy2(chk, rel / f"{v['id']}_facecam_check.jpg")
 (rel / "index.json").write_text(json.dumps(items, indent=1))
 
 # remove big temp files (full video + wav) to save disk
