@@ -132,12 +132,10 @@ def _err(r):
         return str(getattr(r, "text", ""))[:300]
 
 
-def generate(parts, parse, label="AI", models=None, key=None, timeout=120):
-    """Send parts to Gemini and return parse(answer_text), or None if the AI is not available."""
-    key = key or os.environ.get("GEMINI_API_KEY")
-    if not key:
-        print(f"  {label}: no GEMINI_API_KEY secret, skipping")
-        return None
+OPENROUTER_MODELS = ["google/gemini-3.5-flash", "google/gemini-3.5-flash-lite"]
+
+
+def _gemini(parts, parse, label, models, key, timeout):
     env_model = (os.environ.get("GEMINI_MODEL") or "").strip()
     models = models or ([env_model] if env_model else []) + DEFAULT_MODELS
     body = {"contents": [{"role": "user", "parts": parts}],
@@ -176,11 +174,86 @@ def generate(parts, parse, label="AI", models=None, key=None, timeout=120):
                 print(f"  {label}: {model} gave an answer I could not read ({type(e).__name__}: {e})")
                 break
             if res:
-                print(f"  {label}: done with {model}")
+                print(f"  {label}: done with {model} (Gemini)")
                 return res
             print(f"  {label}: {model} answered, but with nothing usable")
             break
     return None
+
+
+def _to_openrouter(parts):
+    content = []
+    for p in parts:
+        if "text" in p:
+            content.append({"type": "text", "text": p["text"]})
+        elif "inline_data" in p:
+            mime, data = p["inline_data"]["mime_type"], p["inline_data"]["data"]
+            kind = "video_url" if mime.startswith("video") else "image_url"
+            content.append({"type": kind, kind: {"url": f"data:{mime};base64,{data}"}})
+    return content
+
+
+def _openrouter(parts, parse, label, models, key, timeout):
+    env_model = (os.environ.get("OPENROUTER_MODEL") or "").strip()
+    models = models or ([env_model] if env_model else []) + OPENROUTER_MODELS
+    body_base = {"messages": [{"role": "user", "content": _to_openrouter(parts)}],
+                 "response_format": {"type": "json_object"}, "temperature": 0.4}
+    for model in models:
+        for attempt in range(2):
+            try:
+                r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                                           "X-Title": "Auto clipper"},
+                                  json={**body_base, "model": model}, timeout=timeout)
+            except Exception as e:
+                print(f"  {label}: OpenRouter {model}: network error or timeout ({type(e).__name__})")
+                break
+            if r.status_code == 429:
+                print(f"  {label}: OpenRouter {model} is over its limit: {_err(r)[:160]}")
+                if attempt == 0:
+                    time.sleep(20)
+                    continue
+                break
+            if r.status_code == 402:
+                print(f"  {label}: OpenRouter says you are out of credits: {_err(r)[:160]}")
+                return None
+            if r.status_code in (401, 403):
+                print(f"  {label}: the OpenRouter key was rejected ({r.status_code}): {_err(r)[:160]}")
+                return None
+            if r.status_code in (500, 502, 503):
+                print(f"  {label}: OpenRouter {model} is busy ({r.status_code})")
+                time.sleep(10)
+                continue
+            if r.status_code != 200:
+                print(f"  {label}: OpenRouter {model} not usable ({r.status_code}): {_err(r)[:160]}")
+                break
+            try:
+                res = parse(r.json()["choices"][0]["message"]["content"])
+            except Exception as e:
+                print(f"  {label}: OpenRouter {model} gave an answer I could not read ({type(e).__name__}: {e})")
+                break
+            if res:
+                print(f"  {label}: done with {model} (OpenRouter)")
+                return res
+            print(f"  {label}: OpenRouter {model} answered, but with nothing usable")
+            break
+    return None
+
+
+def generate(parts, parse, label="AI", models=None, key=None, timeout=120):
+    """Ask the AI and return parse(answer_text), or None if no AI is available.
+    Tries Gemini first (if GEMINI_API_KEY is set), then OpenRouter (if OPENROUTER_API_KEY is set)."""
+    gkey = key or os.environ.get("GEMINI_API_KEY")
+    okey = os.environ.get("OPENROUTER_API_KEY")
+    if not gkey and not okey:
+        print(f"  {label}: no GEMINI_API_KEY or OPENROUTER_API_KEY secret, skipping")
+        return None
+    if gkey:
+        res = _gemini(parts, parse, label, models, gkey, timeout)
+        if res or not okey:
+            return res
+        print(f"  {label}: Gemini did not work, trying OpenRouter")
+    return _openrouter(parts, parse, label, None, okey, timeout)
 
 
 def rank(cands, title, channel, num, want_broll=False, notes="", models=None, key=None):
