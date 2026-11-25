@@ -440,78 +440,216 @@ YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection
 
 def yunet_model():
     path = Path.home() / ".cache" / "clipper" / "yunet.onnx"
-    try:
-        if path.exists() and path.stat().st_size > 10000:
-            return str(path)
-        import urllib.request
-        path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(YUNET_URL, path)
-        return str(path) if path.stat().st_size > 10000 else None
-    except Exception:
+    if path.exists() and path.stat().st_size > 10000:
+        return str(path)
+    import urllib.request
+    for attempt in range(3):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(YUNET_URL, path)
+            if path.stat().st_size > 10000:
+                return str(path)
+        except Exception as e:
+            print(f"    could not download the face model (try {attempt + 1}): {type(e).__name__}")
+    return None
+
+
+class Faces:
+    """Face detector: YuNet if its model can be downloaded, otherwise OpenCV's older Haar detector."""
+
+    def __init__(self):
+        self.kind, self.yn, self.haar = None, None, None
+        try:
+            import cv2
+        except ImportError:
+            print("    face detection is not installed")
+            return
+        self.cv2 = cv2
+        model = yunet_model()
+        if model and hasattr(cv2, "FaceDetectorYN"):
+            try:
+                self.yn = cv2.FaceDetectorYN.create(model, "", (320, 320), 0.6, 0.3, 200)
+                self.kind = "YuNet"
+            except Exception as e:
+                print(f"    YuNet could not start: {e}")
+        if self.yn is None:
+            try:
+                h = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+                if not h.empty():
+                    self.haar, self.kind = h, "Haar (less accurate)"
+            except Exception:
+                pass
+        print(f"    face detector: {self.kind or 'none available'}")
+
+    @property
+    def ok(self):
+        return self.kind is not None
+
+    def detect(self, bgr, min_score=0.6):
+        """Faces in a frame as [(cx, cy, w, h, score)], all as fractions of the frame (0..1)."""
+        cv2 = self.cv2
+        H, W = bgr.shape[:2]
+        sw = min(W, 960)
+        sh = max(1, int(H * sw / W))
+        small = cv2.resize(bgr, (sw, sh)) if sw != W else bgr
+        out = []
+        if self.yn is not None:
+            self.yn.setInputSize((sw, sh))
+            _, faces = self.yn.detect(small)
+            for f in (faces if faces is not None else []):
+                if float(f[14]) >= min_score:
+                    out.append(((f[0] + f[2] / 2) / sw, (f[1] + f[3] / 2) / sh, f[2] / sw, f[3] / sh, float(f[14])))
+        elif self.haar is not None:
+            for (x, y, w, h) in self.haar.detectMultiScale(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 1.1, 6, minSize=(int(0.03 * sw), int(0.03 * sw))):
+                out.append(((x + w / 2) / sw, (y + h / 2) / sh, w / sw, h / sh, 1.0))
+        return out
+
+
+_FACES = []
+
+
+def get_faces():
+    if not _FACES:
+        _FACES.append(Faces())
+    return _FACES[0]
+
+
+def video_size(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True)
+    w, h = r.stdout.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+def grab_bgr(src, t, headers=None, width=960):
+    jpg = grab_frame(src, t, headers, width)
+    if not jpg:
         return None
+    import cv2
+    return cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
 
 
-def face_samples(video, ss, length, step=0.5):
-    """Face position every `step` seconds: (W, H, [(t, (cx, cy, fw) or None), ...]) or None."""
+def cluster_facecam(per_frame):
+    """Find the facecam: a face that sits in the SAME place in many frames spread over the whole video.
+    Game characters move around, so they never form such a group."""
+    n = len(per_frame)
+    if n < 4:
+        return None
+    clusters = []
+    for fi, dets in enumerate(per_frame):
+        for (cx, cy, w, h, _) in dets:
+            for c in clusters:
+                m = c["m"]
+                if abs(cx - m[0]) < 0.06 and abs(cy - m[1]) < 0.08 and 0.6 < w / m[2] < 1.6:
+                    c["boxes"].append((fi, cx, cy, w, h))
+                    k = len(c["boxes"])
+                    c["m"] = [m[i] + (v - m[i]) / k for i, v in enumerate((cx, cy, w, h))]
+                    break
+            else:
+                clusters.append({"boxes": [(fi, cx, cy, w, h)], "m": [cx, cy, w, h]})
+    best = None
+    for c in clusters:
+        frames = len({b[0] for b in c["boxes"]})
+        med = lambda i: sorted(b[i] for b in c["boxes"])[len(c["boxes"]) // 2]
+        cx, cy, w, h = med(1), med(2), med(3), med(4)
+        edge = min(cx, 1 - cx) < 0.3 and min(cy, 1 - cy) < 0.4  # sits near a corner, like a facecam overlay
+        score = frames * (1.35 if edge else 1.0)
+        if frames >= max(3, 0.3 * n) and (best is None or score > best[0]):
+            best = (score, {"cx": cx, "cy": cy, "w": w, "h": h, "frames": frames, "of": n, "edge": edge})
+    return best[1] if best else None
+
+
+def find_facecam(src, headers, duration, n=12):
+    """Look at n frames spread over the video and find the streamer's facecam."""
+    faces = get_faces()
+    if not faces.ok or not src or not duration:
+        return None
+    per_frame = []
+    for i in range(n):
+        img = grab_bgr(src, duration * (0.06 + 0.88 * i / (n - 1)), headers)
+        if img is not None:
+            per_frame.append(faces.detect(img, 0.8))
+    got = sum(1 for d in per_frame if d)
+    cam = cluster_facecam(per_frame)
+    print(f"    looked at {len(per_frame)} frames, faces seen in {got}; " +
+          (f"facecam found at x={cam['cx']:.2f}, y={cam['cy']:.2f} (face width {cam['w']:.2f}), in {cam['frames']} frames"
+           if cam else "no facecam found"))
+    return cam
+
+
+def facecam_check_image(path, src, headers, duration, cam):
+    """A picture you can look at to see what was detected (saved next to the clips)."""
     try:
         import cv2
-    except ImportError:
+        img = grab_bgr(src, duration * 0.5, headers)
+        if img is None:
+            return
+        H, W = img.shape[:2]
+        if cam:
+            x0, y0 = int((cam["cx"] - cam["w"] / 2) * W), int((cam["cy"] - cam["h"] / 2) * H)
+            x1, y1 = int((cam["cx"] + cam["w"] / 2) * W), int((cam["cy"] + cam["h"] / 2) * H)
+            cv2.rectangle(img, (x0, y0), (x1, y1), (0, 255, 0), 3)
+        cv2.putText(img, "facecam found" if cam else "no facecam found", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 0) if cam else (0, 0, 255), 3)
+        cv2.imwrite(str(path), img)
+    except Exception:
+        pass
+
+
+def prepare_facecam(a, src, headers, duration, out):
+    """Decide where the facecam is, once per video: by hand (--facecam tl/tr/bl/br/none) or by looking."""
+    a.facecam_info = None
+    if a.framing not in ("stack", "face"):
+        return
+    if a.facecam == "none":
+        a.facecam_info = {"none": True}
+    elif a.facecam in ("tl", "tr", "bl", "br"):
+        a.facecam_info = {"preset": a.facecam, "size": a.facecam_size}
+        print(f"    facecam set by hand: {a.facecam}")
+    else:
+        progress.report(a.ai_lo - 0.05, "Looking for the facecam")
+        a.facecam_info = find_facecam(src, headers, duration)
+        facecam_check_image(out / "facecam_check.jpg", src, headers, duration or 60, a.facecam_info)
+
+
+def face_samples(video, ss, length, prior=None, step=0.5):
+    """Face position every `step` seconds: [(t, (cx, cy, face_width) in pixels or None)], W, H.
+    With a prior (where the facecam is), only faces near it count, never game characters elsewhere."""
+    faces = get_faces()
+    if not faces.ok:
         return None
+    import cv2
     cap = cv2.VideoCapture(str(video))
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if not (W and H):
         return None
-    yn, haar = None, None
-    model = yunet_model()
-    if model and hasattr(cv2, "FaceDetectorYN"):
-        try:
-            yn = cv2.FaceDetectorYN.create(model, "", (320, 320), 0.7, 0.3, 50)
-        except Exception:
-            yn = None
-    if yn is None:
-        try:
-            haar = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        except Exception:
-            haar = None
-        if haar is None or haar.empty():
-            cap.release()
-            print("    no face detector available")
-            return None
-    sw = 640
-    sh = max(1, int(H * sw / W))
-    scale = W / sw
     samples, t = [], 0.0
     while t < length:
         cap.set(cv2.CAP_PROP_POS_MSEC, (ss + t) * 1000)
         ok, frame = cap.read()
         if not ok:
             break
-        small = cv2.resize(frame, (sw, sh))
-        box = None
-        if yn is not None:
-            yn.setInputSize((sw, sh))
-            _, faces = yn.detect(small)
-            if faces is not None and len(faces):
-                f = max(faces, key=lambda r: r[2] * r[3])
-                box = (float(f[0]), float(f[1]), float(f[2]), float(f[3]))
-        else:
-            faces = haar.detectMultiScale(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), 1.1, 5, minSize=(40, 40))
-            if len(faces):
-                f = max(faces, key=lambda r: r[2] * r[3])
-                box = tuple(float(v) for v in f)
-        samples.append((t, None if box is None else ((box[0] + box[2] / 2) * scale, (box[1] + box[3] / 2) * scale, box[2] * scale)))
+        dets = faces.detect(frame, 0.6)
+        pick = None
+        if dets and prior:
+            d = min(dets, key=lambda d: (d[0] * W - prior[0]) ** 2 + (d[1] * H - prior[1]) ** 2)
+            if abs(d[0] * W - prior[0]) < 0.2 * W and abs(d[1] * H - prior[1]) < 0.25 * H:
+                pick = d
+        elif dets:
+            pick = max(dets, key=lambda d: d[2] * d[3])
+        samples.append((t, None if pick is None else (pick[0] * W, pick[1] * H, pick[2] * W)))
         t += step
     cap.release()
     return W, H, samples
 
 
-def face_track(video, ss, length):
+def face_track(video, ss, length, prior=None):
     """The face's path over the clip: {W, H, fw, t, cx, cy} or None if there is no steady face."""
-    got = face_samples(video, ss, length)
+    got = face_samples(video, ss, length, prior)
     if not got:
         return None
     W, H, samples = got
     hits = [s for s in samples if s[1]]
+    print(f"    face tracking: face found in {len(hits)} of {len(samples)} moments")
     if len(hits) < max(3, 0.2 * len(samples)):
         return None
     fw = sorted(s[1][2] for s in hits)[len(hits) // 2]
@@ -569,37 +707,77 @@ def with_zoom(graph, zoom):
     return graph[:-4] + "," + edit.zoom_filter(1080, 1920, zoom["at"], zoom["seconds"]) + "[v0]"
 
 
-def layout_graph(mode, video, ss, length, zoom=None):
+def game_x(W, gw, cam):
+    """Where to crop the gameplay horizontally: the middle, but away from the facecam if it is in the way."""
+    gx = (W - gw) // 2
+    if not cam:
+        return gx
+    x0, y0, x1, y1 = cam
+    if x1 <= gx or x0 >= gx + gw:
+        return gx
+    cand = min(W - gw, int(x1) + 10) if (x0 + x1) / 2 < W / 2 else max(0, int(x0) - gw - 10)
+    return cand if 0 <= cand <= W - gw else gx
+
+
+def layout_graph(mode, video, ss, length, zoom=None, facecam=None):
     """Returns (ffmpeg graph from [0:v] to [v0], headline-on-the-seam?, layout actually used).
-    zoom = {at, seconds, target} punches in on the funny moment."""
+    zoom = {at, seconds, target} punches in on the funny moment.
+    facecam = where the streamer's facecam is: found by looking, set by hand, or {"none": True}."""
     if mode == "blur":
         return with_zoom(BLUR, zoom), False, "blur"
     if mode in ("stack", "face"):
-        tr = face_track(video, ss, length)
-        if not tr:
-            print("    no steady face found, using the " + ("blurred layout" if mode == "stack" else "center crop"))
-            return (with_zoom(BLUR, zoom), False, "blur") if mode == "stack" else (with_zoom(CENTER, zoom), False, "center")
-        W, H, fw, ts = tr["W"], tr["H"], tr["fw"], tr["t"]
+        fallback = (with_zoom(BLUR, zoom), False, "blur") if mode == "stack" else (with_zoom(CENTER, zoom), False, "center")
+        if facecam and facecam.get("none"):
+            print("    no facecam in this video: using the " + fallback[2] + " layout")
+            return fallback
+        if facecam is None:
+            print("    no facecam found in this video: using the " + fallback[2] + " layout (you can set its corner in the app)")
+            return fallback
+        W, H = video_size(video)
         clamp = lambda v, lo, hi: max(lo, min(hi, v))
+        if mode == "face" and facecam and "cx" in facecam and facecam["w"] < 0.12:
+            print("    the face is a small facecam overlay, so this uses the face-on-top layout instead")
+            mode = "stack"
+        preset = facecam.get("preset") if facecam else None
+        tr = None
+        if not preset:
+            prior = (facecam["cx"] * W, facecam["cy"] * H) if facecam and "cx" in facecam else None
+            tr = face_track(video, ss, length, prior)
+            if not tr and prior:  # not seen in this clip: stay where the facecam was found
+                tr = {"W": W, "H": H, "fw": facecam["w"] * W, "t": [0.0, float(length)], "cx": [prior[0]] * 2, "cy": [prior[1]] * 2}
+            if not tr:
+                print("    no steady face found, using the " + fallback[2] + " layout")
+                return fallback
         if mode == "face":
             cw = int(H * 9 / 16) // 2 * 2
             cxs = follow(tr["cx"], 0.12 * cw, 0.3 * cw)
-            xe = path_expr(ts, [clamp(c - cw / 2, 0, W - cw) for c in cxs])
+            xe = path_expr(tr["t"], [clamp(c - cw / 2, 0, W - cw) for c in cxs])
             print("    face found, the crop follows it")
             return with_zoom(f"[0:v]crop={cw}:{H}:x='{xe}':y=0,scale=1080:1920[v0]", zoom), False, "face"
-        pw = min(W, max(fw * 3.0, H * 0.35))  # the facecam is about 3 face-widths wide
-        ph = pw * TOP_H / 1080
-        if ph > H:
-            ph, pw = H, H * 1080 / TOP_H
-        pw, ph = int(pw) // 2 * 2, int(ph) // 2 * 2
-        cxs = follow(tr["cx"], 0.12 * pw, 0.3 * pw)
-        cys = follow(tr["cy"], 0.12 * ph, 0.3 * ph)
-        xe = path_expr(ts, [clamp(c - pw / 2, 0, W - pw) for c in cxs])
-        ye = path_expr(ts, [clamp(c - ph * 0.45, 0, H - ph) for c in cys])
+        if preset:  # a fixed rectangle in the chosen corner
+            pw = int(W * facecam.get("size", 0.26)) // 2 * 2
+            ph = int(pw * TOP_H / 1080) // 2 * 2
+            m = int(0.01 * W)
+            px = m if preset in ("tl", "bl") else W - pw - m
+            py = m if preset in ("tl", "tr") else H - ph - m
+            xe, ye, rect = str(px), str(py), (px, py, px + pw, py + ph)
+            print(f"    facecam taken from the {preset} corner")
+        else:
+            pw = min(W, max(tr["fw"] * 3.0, H * 0.35))  # the facecam is about 3 face-widths wide
+            ph = pw * TOP_H / 1080
+            if ph > H:
+                ph, pw = H, H * 1080 / TOP_H
+            pw, ph = int(pw) // 2 * 2, int(ph) // 2 * 2
+            cxs = follow(tr["cx"], 0.12 * pw, 0.3 * pw)
+            cys = follow(tr["cy"], 0.12 * ph, 0.3 * ph)
+            xs = [clamp(c - pw / 2, 0, W - pw) for c in cxs]
+            ys = [clamp(c - ph * 0.45, 0, H - ph) for c in cys]
+            xe, ye = path_expr(tr["t"], xs), path_expr(tr["t"], ys)
+            rect = (min(xs), min(ys), max(xs) + pw, max(ys) + ph)
+            print("    face found: face on top (the crop follows it), gameplay below")
         gw = min(W, int(H * 1080 / BOT_H)) // 2 * 2
         gh = int(gw * BOT_H / 1080) // 2 * 2
-        gx = (W - gw) // 2
-        print("    face found: face on top (the crop follows it), gameplay below")
+        gx = game_x(W, gw, rect)
         ztop = ("," + edit.zoom_filter(1080, TOP_H, zoom["at"], zoom["seconds"])) if zoom and zoom.get("target") == "face" else ""
         zbot = ("," + edit.zoom_filter(1080, BOT_H, zoom["at"], zoom["seconds"])) if zoom and zoom.get("target") != "face" else ""
         graph = (f"[0:v]split[t][g];[t]crop={pw}:{ph}:x='{xe}':y='{ye}',scale=1080:{TOP_H}{ztop}[top];"
@@ -846,6 +1024,7 @@ def short_pipeline(a, out, work):
     a.wav = wav
     a.ctx = {"src": str(video), "headers": None, "wav": wav, "audio_sep": False}
     rms = loudness_per_second(wav)
+    prepare_facecam(a, str(video), None, info.get("duration") or len(rms), out)
     print("3/5 Transcribing (slow on CPU)...")
     tstage = progress.stage(0.34, 0.65)
     segments = transcribe(wav, a.model, a.language, duration=len(rms), on_progress=lambda f: tstage(f, f"Transcribing {int(f * 100)}%"))
@@ -894,6 +1073,8 @@ def long_pipeline(a, out, work):
         print(f"  candidate {i}/{len(cands)} done")
     attach_text(cands, segments)
     remote = remote_source(info)
+    cam_src = remote_source(info, 720) or remote
+    prepare_facecam(a, cam_src[0] if cam_src else None, cam_src[1] if cam_src else None, info.get("duration") or len(rms), out)
     a.ctx = {"src": remote[0] if remote else None, "headers": remote[1] if remote else None, "wav": wav, "audio_sep": True}
     use_director = a.ai == "on" and a.director == "on" and remote is not None
     picks = choose(cands, a, info, remote, k=(a.num + 3) if use_director else None)
@@ -981,6 +1162,9 @@ def main():
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
     ap.add_argument("--framing", default="stack", choices=["stack", "blur", "face", "center"], help="how to make it vertical")
     ap.add_argument("--captions", default="karaoke", choices=["karaoke", "classic", "off"], help="caption style")
+    ap.add_argument("--facecam", default="auto", choices=["auto", "tl", "tr", "bl", "br", "none"],
+                    help="where the facecam is: auto-detect, a corner (top/bottom left/right), or none")
+    ap.add_argument("--facecam-size", type=float, default=0.26, help="facecam width as a share of the video width (corner mode)")
     ap.add_argument("--caption-margin", type=int, default=230, help="caption distance from the bottom edge (pixels of 1920)")
     ap.add_argument("--hook", default="auto", choices=["auto", "off"], help="headline in the first seconds")
     ap.add_argument("--ai", default="on", choices=["on", "off"], help="AI moment picking and virality scores")
@@ -1012,7 +1196,7 @@ def main():
         progress.report(a.cut_lo + (1 - a.cut_lo) * (n - 1) / max(1, len(picks)), f"Editing clip {n} of {len(picks)}")
         name = f"clip_{n:02}"
         video, ss, length, tl, mwords, cues = clip_edits(a, p, segments, work, name, out)
-        graph, seam, used = layout_graph(a.framing, video, ss, length, cues["zoom"])
+        graph, seam, used = layout_graph(a.framing, video, ss, length, cues["zoom"], a.facecam_info)
         captions = None
         if a.captions == "karaoke" and write_ass_words(out / f"{name}.ass", mwords, length, a.caption_margin, cues["emphasis"]):
             captions = ("ass", f"{name}.ass")
