@@ -71,7 +71,7 @@ def rms_track(wav_path, start, end, step=0.1):
 
 
 # ---------- planning ----------
-def plan_cuts(words, rms, step, length, protect=(), min_gap=0.9, keep=0.25, max_share=0.4):
+def plan_cuts(words, rms, step, length, protect=(), min_gap=0.9, keep=0.25, max_share=0.3):
     """Silent gaps to remove. A gap counts only if nobody speaks AND it is quiet (action sounds stay)."""
     if not words:
         return []
