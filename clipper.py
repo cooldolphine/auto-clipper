@@ -598,7 +598,7 @@ def facecam_check_image(path, src, headers, duration, cam):
 def prepare_facecam(a, src, headers, duration, out):
     """Decide where the facecam is, once per video: by hand (--facecam tl/tr/bl/br/none) or by looking."""
     a.facecam_info = None
-    if a.framing not in ("stack", "face"):
+    if a.framing not in ("stack", "face", "auto"):
         return
     if a.facecam == "none":
         a.facecam_info = {"none": True}
@@ -611,7 +611,7 @@ def prepare_facecam(a, src, headers, duration, out):
         facecam_check_image(out / "facecam_check.jpg", src, headers, duration or 60, a.facecam_info)
 
 
-def face_samples(video, ss, length, prior=None, step=0.5):
+def face_samples(video, ss, length, prior=None, step=0.5, follow=False):
     """Face position every `step` seconds: [(t, (cx, cy, face_width) in pixels or None)], W, H.
     With a prior (where the facecam is), only faces near it count, never game characters elsewhere."""
     faces = get_faces()
@@ -622,7 +622,7 @@ def face_samples(video, ss, length, prior=None, step=0.5):
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if not (W and H):
         return None
-    samples, t = [], 0.0
+    samples, t, prev, lost = [], 0.0, None, 0.0
     while t < length:
         cap.set(cv2.CAP_PROP_POS_MSEC, (ss + t) * 1000)
         ok, frame = cap.read()
@@ -630,21 +630,31 @@ def face_samples(video, ss, length, prior=None, step=0.5):
             break
         dets = faces.detect(frame, 0.6)
         pick = None
-        if dets and prior:
+        if dets and follow and prev is not None:  # keep following the same person, never jump to someone else
+            d = min(dets, key=lambda d: (d[0] * W - prev[0]) ** 2 + (d[1] * H - prev[1]) ** 2)
+            if abs(d[0] * W - prev[0]) < 0.3 * W and abs(d[1] * H - prev[1]) < 0.35 * H:
+                pick = d
+            elif lost >= 1.5:  # lost them for a while: start again with the most prominent face
+                pick = max(dets, key=lambda d: d[2] * d[3])
+        elif dets and prior:
             d = min(dets, key=lambda d: (d[0] * W - prior[0]) ** 2 + (d[1] * H - prior[1]) ** 2)
             if abs(d[0] * W - prior[0]) < 0.2 * W and abs(d[1] * H - prior[1]) < 0.25 * H:
                 pick = d
         elif dets:
             pick = max(dets, key=lambda d: d[2] * d[3])
+        if pick is not None:
+            prev, lost = (pick[0] * W, pick[1] * H), 0.0
+        else:
+            lost += step
         samples.append((t, None if pick is None else (pick[0] * W, pick[1] * H, pick[2] * W)))
         t += step
     cap.release()
     return W, H, samples
 
 
-def face_track(video, ss, length, prior=None):
+def face_track(video, ss, length, prior=None, follow=False):
     """The face's path over the clip: {W, H, fw, t, cx, cy} or None if there is no steady face."""
-    got = face_samples(video, ss, length, prior)
+    got = face_samples(video, ss, length, prior, follow=follow)
     if not got:
         return None
     W, H, samples = got
@@ -700,6 +710,45 @@ BLUR = ("[0:v]split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increas
         "[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v0]")
 
 
+def face_counts(video, ss, length, step=1.0):
+    """How many people (clear faces) are in view, once per second. None if there is no face detector."""
+    faces = get_faces()
+    if not faces.ok:
+        return None
+    import cv2
+    cap = cv2.VideoCapture(str(video))
+    counts, t = [], 0.0
+    while t < length:
+        cap.set(cv2.CAP_PROP_POS_MSEC, (ss + t) * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            break
+        counts.append(sum(1 for d in faces.detect(frame, 0.7) if d[2] >= 0.04))
+        t += step
+    cap.release()
+    return counts
+
+
+def decide_layout(video, ss, length, facecam):
+    """Pick the layout for this clip: face on top (facecam), follow the face (one person), or the whole
+    frame on a blurred background (a crowd, or no clear person). Returns (mode, why)."""
+    if facecam and facecam.get("preset"):
+        return "stack", f"facecam set by hand ({facecam['preset']})"
+    if facecam and "cx" in facecam and facecam["w"] < 0.12:
+        return "stack", "a facecam overlay was found"
+    counts = face_counts(video, ss, length)
+    if not counts:
+        return "blur", "no faces could be checked"
+    n = len(counts)
+    multi = sum(1 for c in counts if c >= 2) / n
+    single = sum(1 for c in counts if c == 1) / n
+    if multi >= 0.3:
+        return "blur", f"several people are in view ({multi:.0%} of the clip)"
+    if single >= 0.6:
+        return "face", f"one person is in view ({single:.0%} of the clip)"
+    return "blur", "no single person stays in view"
+
+
 def with_zoom(graph, zoom):
     """Zoom the whole 1080x1920 frame (graphs end with [v0])."""
     if not zoom:
@@ -723,6 +772,11 @@ def layout_graph(mode, video, ss, length, zoom=None, facecam=None):
     """Returns (ffmpeg graph from [0:v] to [v0], headline-on-the-seam?, layout actually used).
     zoom = {at, seconds, target} punches in on the funny moment.
     facecam = where the streamer's facecam is: found by looking, set by hand, or {"none": True}."""
+    if mode == "auto":
+        mode, why = decide_layout(video, ss, length, facecam)
+        print(f"    automatic layout: {mode} ({why})")
+        if mode == "face" and facecam and facecam.get("none"):
+            facecam = None
     if mode == "blur":
         return with_zoom(BLUR, zoom), False, "blur"
     if mode in ("stack", "face"):
@@ -730,7 +784,7 @@ def layout_graph(mode, video, ss, length, zoom=None, facecam=None):
         if facecam and facecam.get("none"):
             print("    no facecam in this video: using the " + fallback[2] + " layout")
             return fallback
-        if facecam is None:
+        if facecam is None and mode == "stack":
             print("    no facecam found in this video: using the " + fallback[2] + " layout (you can set its corner in the app)")
             return fallback
         W, H = video_size(video)
@@ -739,10 +793,15 @@ def layout_graph(mode, video, ss, length, zoom=None, facecam=None):
             print("    the face is a small facecam overlay, so this uses the face-on-top layout instead")
             mode = "stack"
         preset = facecam.get("preset") if facecam else None
+        if preset and mode == "face":
+            mode = "stack"
         tr = None
         if not preset:
             prior = (facecam["cx"] * W, facecam["cy"] * H) if facecam and "cx" in facecam else None
-            tr = face_track(video, ss, length, prior)
+            follow_one = mode == "face" and prior is None  # no fixed facecam: follow one person
+            if follow_one:
+                print("    no fixed facecam: following the most prominent face")
+            tr = face_track(video, ss, length, prior, follow=follow_one)
             if not tr and prior:  # not seen in this clip: stay where the facecam was found
                 tr = {"W": W, "H": H, "fw": facecam["w"] * W, "t": [0.0, float(length)], "cx": [prior[0]] * 2, "cy": [prior[1]] * 2}
             if not tr:
@@ -1038,8 +1097,9 @@ def short_pipeline(a, out, work):
     picks = choose(cands, a, info, (str(video), None), k=(a.num + 3) if use_director else None)
     if use_director:
         picks = direct(picks, a, info, segments, work)
+    set_windows(picks, a, info)
     for p in picks:
-        p["video"], p["ss"] = video, p["start"]
+        p["video"], p["t0"] = video, 0.0
     return info, picks, segments
 
 
@@ -1080,19 +1140,20 @@ def long_pipeline(a, out, work):
     picks = choose(cands, a, info, remote, k=(a.num + 3) if use_director else None)
     if use_director:
         picks = direct(picks, a, info, segments, work)
+    set_windows(picks, a, info)
     print(f"4/5 Downloading only the {len(picks)} chosen sections of the video...")
     ok = []
     for n, p in enumerate(picks, 1):
         progress.report(0.62 + 0.17 * (n - 1) / max(1, len(picks)), f"Downloading section {n} of {len(picks)}")
-        path = fetch_section(info, work / f"seg_{n:02}.mp4", p["start"], p["end"] + 1, a.height)
+        path = fetch_section(info, work / f"seg_{n:02}.mp4", p["win0"], p["win1"] + 1, a.height)
         if not path:
             print(f"  section {n}: direct download failed, trying yt-dlp")
             try:
-                path = download_segment(a.url, work, n, p["start"], p["end"] + 1, a.cookies, a.height)
+                path = download_segment(a.url, work, n, p["win0"], p["win1"] + 1, a.cookies, a.height)
             except Exception as e:
                 print(f"  section {n}: could not be downloaded ({str(e)[:160]}), skipping it")
                 continue
-        p["video"], p["ss"] = path, 0
+        p["video"], p["t0"] = path, p["win0"]
         ok.append(p)
     if not ok:
         raise RuntimeError("none of the chosen sections could be downloaded")
@@ -1103,19 +1164,42 @@ def to_rel(cue, start):
     return cue and {**cue, "at": cue["at"] - start}
 
 
-def clip_edits(a, p, segments, work, name, out):
-    """Everything between 'we know the moment' and 'ready to style': cut silence, slow motion, cues.
-    Returns (video, ss, length, timeline, words_new, cues)."""
-    length = p["end"] - p["start"]
-    words = [{"start": w["start"] - p["start"], "end": w["end"] - p["start"], "word": w["word"]}
-             for s in segments for w in s.get("words", []) if p["start"] - 0.05 <= w["start"] < p["end"]]
-    rms, step = edit.rms_track(a.wav, p["start"], p["end"])
+def set_windows(picks, a, info):
+    """How much of the video each clip needs: its funny moment plus room to reach the target length."""
+    total = float(info.get("duration") or 10 ** 9)
+    target = min(float(a.length), 59.0)
+    for p in picks:
+        s, e = p["start"], p["end"]
+        if a.length_mode == "target":
+            span = min(total, target * 1.7 + 4)  # extra video, because cutting silence makes clips shorter
+            need = max(0.0, span - (e - s))
+            w0, w1 = max(0.0, s - need * 0.35), min(total, e + need * 0.65)
+            short = span - (w1 - w0)
+            if short > 0.1:  # one side ran out of video: use more of the other side
+                if w0 <= 0:
+                    w1 = min(total, w1 + short)
+                else:
+                    w0 = max(0.0, w0 - short)
+        else:
+            w0, w1 = s, e
+        p["win0"], p["win1"] = w0, w1
+
+
+def plan_clip(a, p, segments, s, e):
+    """Plan the edits for the clip [s, e] (absolute seconds) and what its length will be afterwards."""
+    length = e - s
+    words = [{"start": w["start"] - s, "end": w["end"] - s, "word": w["word"]}
+             for sg in segments for w in sg.get("words", []) if s - 0.05 <= w["start"] < e]
+    rms, step = edit.rms_track(a.wav, s, e)
     zoom, slowmo = None, None
     if a.punch == "on":
-        zoom, slowmo = to_rel(p.get("zoom"), p["start"]), to_rel(p.get("slowmo"), p["start"])
+        z, sm = to_rel(p.get("zoom"), s), to_rel(p.get("slowmo"), s)
+        inside = lambda c: c and 0.3 <= c["at"] <= length - 1.0
+        zoom, slowmo = (z if inside(z) else None), (sm if inside(sm) else None)
         if not zoom and not slowmo:  # no AI cue: use the loudest moment
             peak = edit.plan_peak(rms, step, length)
-            zoom, slowmo = {"at": max(0.5, peak - 0.3), "seconds": 1.6, "target": "gameplay"}, {"at": max(0.5, peak - 0.1), "seconds": 1.2}
+            zoom = {"at": max(0.5, peak - 0.3), "seconds": 1.6, "target": "gameplay"}
+            slowmo = {"at": max(0.5, peak - 0.1), "seconds": 1.2}
     cuts = []
     if a.cut_silence == "on":
         protect = [(c["at"] - 0.3, c["at"] + c["seconds"] + 0.3) for c in (zoom, slowmo) if c]
@@ -1124,13 +1208,51 @@ def clip_edits(a, p, segments, work, name, out):
     if slowmo:
         s0 = max(0.0, min(slowmo["at"], length - 1.0))
         slows = [(s0, min(length, s0 + slowmo["seconds"]), 0.5)]
-    tl = edit.Timeline(length, cuts, slows)
+    return {"length": length, "words": words, "rms": rms, "step": step, "zoom": zoom, "slowmo": slowmo,
+            "cuts": cuts, "tl": edit.Timeline(length, cuts, slows)}
+
+
+def choose_window(a, p, segments):
+    """Final start/end so that the EDITED clip lasts about --length seconds (never more than 59)."""
+    lo, hi = p["win0"], p["win1"]
+    s0, e0 = p["start"], p["end"]
+    if a.length_mode != "target":
+        return s0, e0, plan_clip(a, p, segments, s0, e0)
+    target = min(float(a.length), 59.0)
+    peak = p.get("peak") or (s0 + e0) / 2
+    L, best = min(target, hi - lo), None
+    for _ in range(5):
+        if L >= e0 - s0:  # keep the director's moment inside, with a bit more before than after
+            s = s0 - (L - (e0 - s0)) * 0.35
+        else:
+            s = peak - L * 0.4
+        s = max(lo, min(s, hi - L))
+        pl = plan_clip(a, p, segments, s, s + L)
+        err = pl["tl"].total - target
+        if best is None or abs(err) < abs(best[3]):
+            best = (s, s + L, pl, err)
+        if abs(err) < 0.6:
+            break
+        newL = max(6.0, min(hi - lo, L - err))
+        if abs(newL - L) < 0.2:
+            break
+        L = newL
+    return best[0], best[1], best[2]
+
+
+def clip_edits(a, p, segments, work, name, out):
+    """Everything between 'we know the moment' and 'ready to style': length, cut silence, slow motion, cues.
+    Returns (video, ss, length, timeline, words_new, cues)."""
+    s, e, pl = choose_window(a, p, segments)
+    p["start"], p["end"] = s, e
+    ss = s - p["t0"]
+    tl, length, words, rms, step, zoom = pl["tl"], pl["length"], pl["words"], pl["rms"], pl["step"], pl["zoom"]
     if tl.identity:
-        video, ss, new_len = p["video"], p["ss"], length
+        video, vss, new_len = p["video"], ss, length
     else:
         raw = out / f"{name}_raw.mp4"
-        edit.assemble(p["video"], raw, p["ss"], length, tl)
-        video, ss, new_len = raw, 0, tl.total
+        edit.assemble(p["video"], raw, ss, length, tl)
+        video, vss, new_len = raw, 0, tl.total
     mwords = [{"start": tl.map(w["start"]), "end": max(tl.map(w["end"]), tl.map(w["start"]) + 0.05), "word": w["word"]} for w in words]
     mzoom = None
     if zoom:
@@ -1139,28 +1261,30 @@ def clip_edits(a, p, segments, work, name, out):
     emph, emoji = [], []
     if a.emoji == "on":
         emph = p.get("emphasis") or edit.loud_words(words, rms, step)
-        for e in p.get("emoji") or []:
-            at = e["at"] - p["start"]
+        for em in p.get("emoji") or []:
+            at = em["at"] - s
             if 0.5 <= at <= length - 1.0:
-                emoji.append({"at": tl.map(at), "emoji": e["emoji"], "seconds": 1.4})
+                emoji.append({"at": tl.map(at), "emoji": em["emoji"], "seconds": 1.4})
     broll_items = []
-    for b in p.get("broll") or []:
-        at = b["at"] - p["start"]
+    for br in p.get("broll") or []:
+        at = br["at"] - s
         if 1.0 <= at <= length - 3.0:
-            broll_items.append({"at": tl.map(at), "seconds": b["seconds"], "query": b["query"]})
-    return video, ss, new_len, tl, mwords, {"zoom": mzoom, "emphasis": emph, "emoji": emoji, "broll": broll_items,
-                                            "cuts": len(cuts), "slowmo": bool(slows)}
+            broll_items.append({"at": tl.map(at), "seconds": br["seconds"], "query": br["query"]})
+    return video, vss, new_len, tl, mwords, {"zoom": mzoom, "emphasis": emph, "emoji": emoji, "broll": broll_items,
+                                             "cuts": len(pl["cuts"]), "slowmo": bool(pl["slowmo"])}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
     ap.add_argument("--num", type=int, default=5, help="number of clips")
-    ap.add_argument("--length", type=int, default=30, help="length of the first-pass windows in seconds")
+    ap.add_argument("--length", type=int, default=30, help="clip length in seconds (Shorts: 58)")
+    ap.add_argument("--length-mode", default="target", choices=["target", "ai"],
+                    help="target: every clip is as close to --length as possible; ai: the AI decides, up to --length")
     ap.add_argument("--out", default="output")
     ap.add_argument("--model", default="base", help="whisper model: tiny/base/small")
     ap.add_argument("--language", default=None, help="e.g. hi for Hindi, en for English (default: auto)")
-    ap.add_argument("--framing", default="stack", choices=["stack", "blur", "face", "center"], help="how to make it vertical")
+    ap.add_argument("--framing", default="auto", choices=["auto", "stack", "blur", "face", "center"], help="how to make it vertical")
     ap.add_argument("--captions", default="karaoke", choices=["karaoke", "classic", "off"], help="caption style")
     ap.add_argument("--facecam", default="auto", choices=["auto", "tl", "tr", "bl", "br", "none"],
                     help="where the facecam is: auto-detect, a corner (top/bottom left/right), or none")
