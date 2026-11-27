@@ -37,9 +37,9 @@ on:
         required: false
         default: "small"
       framing:
-        description: "Vertical framing: stack, blur, face or center"
+        description: "Vertical layout: auto, stack, blur, face or center"
         required: false
-        default: "stack"
+        default: "auto"
       captions:
         description: "Captions: karaoke, classic or off"
         required: false
@@ -84,6 +84,10 @@ on:
         description: "Where the facecam is: auto, tl, tr, bl, br or none"
         required: false
         default: "auto"
+      length_mode:
+        description: "Clip length: target (as close to the length as possible) or ai (AI decides, up to the length)"
+        required: false
+        default: "target"
 
 permissions:
   contents: write
@@ -130,6 +134,7 @@ jobs:
           RUN_CUT_SILENCE: ${{ inputs.cut_silence }}
           RUN_EMOJI: ${{ inputs.emoji }}
           RUN_FACECAM: ${{ inputs.facecam }}
+          RUN_LENGTH_MODE: ${{ inputs.length_mode }}
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
