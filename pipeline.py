@@ -71,7 +71,7 @@ if os.environ.get("RUN_MODEL"):
 for env_name, key in (("RUN_FRAMING", "framing"), ("RUN_CAPTIONS", "captions"), ("RUN_HOOK", "hook"),
                       ("RUN_AI", "ai"), ("RUN_BROLL", "broll"), ("RUN_TRANSITIONS", "transitions"),
                       ("RUN_DIRECTOR", "director"), ("RUN_PUNCH", "punch"), ("RUN_CUT_SILENCE", "cut_silence"), ("RUN_EMOJI", "emoji"),
-                      ("RUN_FACECAM", "facecam")):
+                      ("RUN_FACECAM", "facecam"), ("RUN_LENGTH_MODE", "length_mode")):
     if os.environ.get(env_name):
         cfg[key] = os.environ[env_name]
 if os.environ.get("RUN_LANGUAGE"):
@@ -104,7 +104,8 @@ for i, v in enumerate(videos):
         "--num", str(cfg["clips_per_video"]), "--length", str(cfg["clip_length_seconds"]),
         "--model", cfg.get("whisper_model", "base"),
         "--height", str(cfg.get("max_height", 1080)),
-        "--framing", cfg.get("framing", "stack"),
+        "--framing", cfg.get("framing", "auto"),
+        "--length-mode", cfg.get("length_mode", "target"),
         "--captions", cfg.get("captions", "karaoke"),
         "--caption-margin", str(cfg.get("caption_margin", 230)),
         "--hook", cfg.get("hook", "auto"),
